@@ -1,0 +1,5 @@
+/out
+/dawn
+/libev
+/_*
+.DS_Store

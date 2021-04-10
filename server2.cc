@@ -244,6 +244,49 @@ static void PrintGLFWError(int code, const char* message) {
 }
 
 
+// onKeyPress is called when keyboard keys are pressed.
+//   window   The window that received the event.
+//   key      The keyboard key that was pressed or released. (GLFW_KEY_*)
+//   scancode The system-specific scancode of the key.
+//   action   One of: GLFW_PRESS, GLFW_RELEASE, GLFW_REPEAT
+//   mods     Bit field describing which modifier keys were held down. (GLFW_MOD_*)
+//
+void onKeyPress(GLFWwindow* window, int key, int scancode, int action, int mods) {
+  if (action != GLFW_PRESS)
+    return;
+  printf("key press #%d %s\n", key, glfwGetKeyName(key, scancode));
+
+  switch (key) {
+  case GLFW_KEY_A:
+    animate = !animate;
+    break;
+
+  default:
+    break;
+  }
+}
+
+// onWindowFramebufferResize is called when a window's framebuffer has changed size
+//   window The window which framebuffer was resized.
+//   width  The new width, in pixels, of the framebuffer.
+//   height The new height, in pixels, of the framebuffer.
+void onWindowFramebufferResize(GLFWwindow* window, int width, int height) {
+  //printf("onWindowFramebufferResize width=%d, height=%d\n", width, height);
+  flushWireBuffers();
+  configureSwapchain(width, height);
+}
+
+// onWindowResize is called when a window has been resized
+//   window The window that was resized.
+//   width  The new width, in screen coordinates, of the window.
+//   height The new height, in screen coordinates, of the window.
+// Note: onWindowResize is called after any call to onWindowFramebufferResize
+void onWindowResize(GLFWwindow* window, int width, int height) {
+  //printf("onWindowResize width=%d, height=%d\n", width, height);
+  // redraw as onWindowFramebufferResize might have replaced the swapchain
+  // render_frame();
+}
+
 void createOSWindow() {
   assert(window == nullptr);
 
@@ -261,6 +304,10 @@ void createOSWindow() {
   // [rsms] move window to bottom right corner of screen
   // glfwSetWindowPos(window, 1920, 960);
   glfwSetWindowPos(window, 2560, 960); // 2nd screen, bottom left corner
+
+  glfwSetKeyCallback(window, onKeyPress);
+  glfwSetFramebufferSizeCallback(window, onWindowFramebufferResize);
+  glfwSetWindowSizeCallback(window, onWindowResize);
 }
 
 
@@ -448,54 +495,9 @@ void render_frame() {
 }
 
 
-// windowOnKeyPress is called when keyboard keys are pressed.
-//   window   The window that received the event.
-//   key      The keyboard key that was pressed or released. (GLFW_KEY_*)
-//   scancode The system-specific scancode of the key.
-//   action   One of: GLFW_PRESS, GLFW_RELEASE, GLFW_REPEAT
-//   mods     Bit field describing which modifier keys were held down. (GLFW_MOD_*)
-//
-void windowOnKeyPress(GLFWwindow* window, int key, int scancode, int action, int mods) {
-  if (action != GLFW_PRESS)
-    return;
-  printf("key press #%d %s\n", key, glfwGetKeyName(key, scancode));
 
-  switch (key) {
-  case GLFW_KEY_A:
-    animate = !animate;
-    break;
-
-  default:
-    break;
-  }
-}
-
-
-// onWindowFramebufferResize is called when a window's framebuffer has changed size
-//   window The window which framebuffer was resized.
-//   width  The new width, in pixels, of the framebuffer.
-//   height The new height, in pixels, of the framebuffer.
-void onWindowFramebufferResize(GLFWwindow* window, int width, int height) {
-  //printf("onWindowFramebufferResize width=%d, height=%d\n", width, height);
-  flushWireBuffers();
-  configureSwapchain(width, height);
-}
-
-// onWindowResize is called when a window has been resized
-//   window The window that was resized.
-//   width  The new width, in screen coordinates, of the window.
-//   height The new height, in screen coordinates, of the window.
-// Note: onWindowResize is called after any call to onWindowFramebufferResize
-void onWindowResize(GLFWwindow* window, int width, int height) {
-  //printf("onWindowResize width=%d, height=%d\n", width, height);
-  // redraw as onWindowFramebufferResize might have replaced the swapchain
-  // render_frame();
-}
-
-
-
-// Client is a connection to a remote client (from the server's perspective)
-struct Client {
+// Conn is a connection to a client
+struct Conn {
   uint32_t id;
   RunLoop* rl;
   ev_io    io;
@@ -534,39 +536,39 @@ struct Client {
 };
 
 const char* sockfile = "server.sock";
-Client* server_client0 = nullptr;
+Conn* conn0 = nullptr;
 
-// onServerIO is called when a server's connection to a client has available I/O
-static void onClientIO(RunLoop* rl, ev_io* w, int revents) {
-  Client* client = (Client*)w->data;
-  // dlog("onClientIO %s %s",
+// onConnIO is called when a client connection has available I/O
+static void onConnIO(RunLoop* rl, ev_io* w, int revents) {
+  Conn* conn = (Conn*)w->data;
+  // dlog("onConnIO %s %s",
   //   revents & EV_READ ? "EV_READ" : "",
   //   revents & EV_WRITE ? "EV_WRITE" : "");
 
-  int fd = client->fd();
+  int fd = conn->fd();
 
   if (revents & EV_READ) {
     char rbuf[COMMAND_BUFFER_SIZE];
     ssize_t n = ::read(fd, rbuf, sizeof(rbuf));
     //dlog("read %zd bytes", n);
     if (n == 0) {
-      dlog("client#%u gone", client->id);
-      client->close();
-      if (client == server_client0)
-        server_client0 = nullptr;
-      delete client;
+      dlog("connection #%u gone", conn->id);
+      conn->close();
+      if (conn == conn0)
+        conn0 = nullptr;
+      delete conn;
       return;
     }
-    // handle incoming data from client
+    // handle incoming data from conn
     if (wireServer->HandleCommands(rbuf, (size_t)n) == nullptr)
       dlog("wireServer->HandleCommands FAILED");
   }
 
   if (revents & EV_WRITE) {
-    auto& b = client->wbuf;
+    auto& b = conn->wbuf;
     if (b.len != 0) {
       ssize_t z = ::write(fd, &b.p[b.len], b.len);
-      dlog("onClientIO write(%zu) => %zd", b.len, z);
+      dlog("onConnIO write(%zu) => %zd", b.len, z);
       if (z < b.len) {
         // shift remaining to 0
         size_t len2 = b.len - size_t(z);
@@ -585,7 +587,7 @@ static void onClientIO(RunLoop* rl, ev_io* w, int revents) {
   }
 }
 
-// onServerIO is called when data is readable, i.e. when a connection is awaiting accept
+// onServerIO is called when a new connection is awaiting accept
 static void onServerIO(RunLoop* rl, ev_io* w, int revents) {
   dlog("onServerIO called");
   int fd = accept(w->fd, NULL, NULL);
@@ -596,19 +598,25 @@ static void onServerIO(RunLoop* rl, ev_io* w, int revents) {
   }
   FDSetNonBlock(fd);
 
-  Client* client = new Client();
-  server_client0 = client;
-  static uint32_t clientIdGen = 0;
-  client->id = clientIdGen++;
-  client->rl = rl;
-  client->io.data = (void*)client;
-  dlog("accepted new connection client#%u [fd %d]", client->id, fd);
+  if (conn0 != nullptr) {
+    dlog("ignoring second client");
+    close(fd);
+    return;
+  }
+
+  Conn* conn = new Conn();
+  conn0 = conn;
+  static uint32_t connIdGen = 0;
+  conn->id = connIdGen++;
+  conn->rl = rl;
+  conn->io.data = (void*)conn;
+  dlog("accepted new connection #%u [fd %d]", conn->id, fd);
   //s2cBuf->w = fd;
-  ev_io_init(&client->io, onClientIO, fd, EV_READ);
-  ev_io_start(rl, &client->io);
+  ev_io_init(&conn->io, onConnIO, fd, EV_READ);
+  ev_io_start(rl, &conn->io);
 
   // send welcome message
-  client->write("OHAI\n", 5);
+  conn->write("OHAI\n", 5);
 }
 
 static void onPollTimeout(RunLoop* rl, ev_timer* w, int revents) {
@@ -619,7 +627,6 @@ static void onPollTimeout(RunLoop* rl, ev_timer* w, int revents) {
 }
 
 int main(int argc, const char* argv[]) {
-  // create socket server
   dlog("starting UNIX socket server \"%s\"", sockfile);
   int fd = createUNIXSocketServer(sockfile);
   if (fd < 0) {
@@ -630,9 +637,6 @@ int main(int argc, const char* argv[]) {
   createOSWindow();
 
   init_dawn();
-  glfwSetKeyCallback(window, windowOnKeyPress);
-  glfwSetFramebufferSizeCallback(window, onWindowFramebufferResize);
-  glfwSetWindowSizeCallback(window, onWindowResize);
 
   RunLoop* rl = EV_DEFAULT;
 
@@ -677,8 +681,8 @@ int main(int argc, const char* argv[]) {
   }
 
   dlog("exit");
-  if (server_client0)
-    server_client0->close();
+  if (conn0)
+    conn0->close();
   ev_io_stop(rl, &server_fd_watcher);
   ev_timer_stop(rl, &timer);
   close(fd);

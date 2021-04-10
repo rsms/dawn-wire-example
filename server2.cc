@@ -16,13 +16,12 @@
 
 #include "utils/BackendBinding.h"
 #include "utils/GLFWUtils.h"
-#include "utils/TerribleCommandBuffer.h"
 
 #include "utils/SystemUtils.h"
 #include "utils/WGPUHelpers.h"
 #include "GLFW/glfw3.h"
 
-#include <dawn/webgpu.h>
+#include <dawn/webgpu_cpp.h>
 
 #include <dawn/dawn_proc.h>
 #include <dawn/dawn_wsi.h>
@@ -45,7 +44,7 @@ _Pragma("GCC diagnostic pop")
 
 typedef struct ev_loop RunLoop;
 
-#define DLOG_PREFIX "\e[1;34m[server]\e[0m "
+#define DLOG_PREFIX "\e[1;34m[server2]\e[0m "
 
 #ifdef DEBUG
   #define dlog(format, ...) ({ \
@@ -141,11 +140,6 @@ static wgpu::BackendType backendType = wgpu::BackendType::OpenGL;
 #endif
 
 
-enum class CmdBufType {
-  None,
-  Terrible,
-};
-
 #define COMMAND_BUFFER_SIZE 4096*32
 
 class LolCommandBuffer : public dawn_wire::CommandSerializer {
@@ -203,7 +197,6 @@ public:
   }
 };
 
-static CmdBufType                             cmdBufType = CmdBufType::Terrible;
 static std::unique_ptr<dawn_native::Instance> instance;
 static utils::BackendBinding*                 binding = nullptr;
 static GLFWwindow*                            window = nullptr;
@@ -213,14 +206,14 @@ static dawn_wire::WireClient* wireClient = nullptr;
 static LolCommandBuffer* c2sBuf = nullptr;
 static LolCommandBuffer* s2cBuf = nullptr;
 
-float uiScale = 1.0;
+wgpu::Device         device;
+wgpu::Queue          queue;
+wgpu::SwapChain      swapchain;
+wgpu::RenderPipeline pipeline;
+// wgpu::TextureView    depthStencilView;
+// wgpu::BindGroup      bindGroup;
 
-
-static WGPUDevice         device;
-static WGPUQueue          queue;
-static WGPUSwapChain      swapchain;
-static WGPURenderPipeline pipeline;
-static WGPUTextureFormat  swapChainFormat;
+bool animate = false;
 
 
 static void PrintDeviceError(WGPUErrorType errorType, const char* message, void*) {
@@ -251,11 +244,7 @@ static void PrintGLFWError(int code, const char* message) {
 }
 
 
-wgpu::Device CreateCppDawnDevice2() {
-  //if (GetEnvironmentVar("ANGLE_DEFAULT_PLATFORM").empty()) {
-  //  SetEnvironmentVar("ANGLE_DEFAULT_PLATFORM", "swiftshader");
-  //}
-
+wgpu::Device createCppDawnDevice() {
   glfwSetErrorCallback(PrintGLFWError);
   if (!glfwInit()) {
     return wgpu::Device();
@@ -268,10 +257,6 @@ wgpu::Device CreateCppDawnDevice2() {
   window = glfwCreateWindow(640, 480, "hello-wire", monitor, nullptr);
   if (!window)
     return wgpu::Device();
-
-  // read window UI scale from OS
-  float yscale = 0.0; // ignored
-  glfwGetWindowContentScale(window, &uiScale, &yscale);
 
   // [rsms] move window to bottom right corner of screen
   // glfwSetWindowPos(window, 1920, 960);
@@ -302,38 +287,25 @@ wgpu::Device CreateCppDawnDevice2() {
     return wgpu::Device();
   }
 
-  // Choose whether to use the backend procs and devices directly, or set up the wire.
-  WGPUDevice cDevice = nullptr;
-  DawnProcTable procs;
+  c2sBuf = new LolCommandBuffer("c2s");
+  s2cBuf = new LolCommandBuffer("s2c");
 
-  switch (cmdBufType) {
-    case CmdBufType::None:
-      procs = backendProcs;
-      cDevice = backendDevice;
-      break;
+  dawn_wire::WireServerDescriptor serverDesc = {};
+  serverDesc.procs = &backendProcs;
+  serverDesc.serializer = s2cBuf;
+  wireServer = new dawn_wire::WireServer(serverDesc);
+  c2sBuf->SetHandler(wireServer);
 
-    case CmdBufType::Terrible: {
-      c2sBuf = new LolCommandBuffer("c2s");
-      s2cBuf = new LolCommandBuffer("s2c");
+  dawn_wire::WireClientDescriptor clientDesc = {};
+  clientDesc.serializer = c2sBuf;
+  wireClient = new dawn_wire::WireClient(clientDesc);
+  s2cBuf->SetHandler(wireClient);
 
-      dawn_wire::WireServerDescriptor serverDesc = {};
-      serverDesc.procs = &backendProcs;
-      serverDesc.serializer = s2cBuf;
-      wireServer = new dawn_wire::WireServer(serverDesc);
-      c2sBuf->SetHandler(wireServer);
+  DawnProcTable procs = dawn_wire::client::GetProcs();
 
-      dawn_wire::WireClientDescriptor clientDesc = {};
-      clientDesc.serializer = c2sBuf;
-      wireClient = new dawn_wire::WireClient(clientDesc);
-      s2cBuf->SetHandler(wireClient);
-
-      procs = dawn_wire::client::GetProcs();
-
-      auto devres = wireClient->ReserveDevice();
-      wireServer->InjectDevice(backendDevice, devres.id, devres.generation);
-      cDevice = devres.device;
-    } break;
-  }
+  dawn_wire::ReservedDevice devReservation = wireClient->ReserveDevice();
+  wireServer->InjectDevice(backendDevice, devReservation.id, devReservation.generation);
+  WGPUDevice cDevice = devReservation.device;
 
   dawnProcSetProcs(&procs);
   procs.deviceSetUncapturedErrorCallback(cDevice, PrintDeviceError, nullptr);
@@ -342,38 +314,36 @@ wgpu::Device CreateCppDawnDevice2() {
 
 
 void flushWireBuffers() {
-  if (cmdBufType == CmdBufType::Terrible) {
-    bool s2cSuccess = s2cBuf->Flush();
-    ASSERT(s2cSuccess);
-  }
+  bool s2cSuccess = s2cBuf->Flush();
+  ASSERT(s2cSuccess);
 }
 
 
 wgpu::TextureFormat GetPreferredSwapChainTextureFormat2() {
-  flushWireBuffers();
   return static_cast<wgpu::TextureFormat>(binding->GetPreferredSwapChainTextureFormat());
 }
 
 
 void configureSwapchain(int width, int height) {
-  WGPUSwapChainDescriptor descriptor = {};
+  wgpu::SwapChainDescriptor descriptor;
   descriptor.implementation = binding->GetSwapChainImplementation();
-  swapchain = wgpuDeviceCreateSwapChain(device, nullptr, &descriptor);
-  swapChainFormat = static_cast<WGPUTextureFormat>(GetPreferredSwapChainTextureFormat2());
-  wgpuSwapChainConfigure(swapchain, swapChainFormat, WGPUTextureUsage_RenderAttachment,
-    width, height);
+  swapchain = device.CreateSwapChain(nullptr, &descriptor);
+  swapchain.Configure(
+    GetPreferredSwapChainTextureFormat2(),
+    wgpu::TextureUsage::RenderAttachment,
+    width,
+    height);
 }
 
 
 void init_dawn() {
-  // device = CreateCppDawnDevice().Release();
-  device = CreateCppDawnDevice2().Release();
-  queue = wgpuDeviceGetQueue(device);
+  device = createCppDawnDevice();
+  queue = device.GetQueue();
 
-  int width_px = 100;
-  int height_px = 100;
-  glfwGetFramebufferSize(window, &width_px, &height_px);
-  configureSwapchain(width_px, height_px);
+  int width = 100;
+  int height = 100;
+  glfwGetFramebufferSize(window, &width, &height);
+  configureSwapchain(width, height);
 
   const char* vs =
     "[[builtin(vertex_index)]] var<in> VertexIndex : u32;\n"
@@ -387,7 +357,7 @@ void init_dawn() {
     "    Position = vec4<f32>(pos[VertexIndex], 0.0, 1.0);\n"
     "    return;\n"
     "}\n";
-  WGPUShaderModule vsModule = utils::CreateShaderModule(device, vs).Release();
+  wgpu::ShaderModule vsModule = utils::CreateShaderModule(device, vs);
 
   const char* fs =
     "[[location(0)]] var<out> fragColor : vec4<f32>;\n"
@@ -395,35 +365,26 @@ void init_dawn() {
     "    fragColor = vec4<f32>(1.0, 0.0, 0.7, 1.0);\n"
     "    return;\n"
     "}\n";
-  WGPUShaderModule fsModule = utils::CreateShaderModule(device, fs).Release();
+  wgpu::ShaderModule fsModule = utils::CreateShaderModule(device, fs);
 
   {
-    WGPURenderPipelineDescriptor2 descriptor = {};
+    wgpu::RenderPipelineDescriptor2 descriptor{};
 
     // Fragment state
-    WGPUBlendState blend = {};
-    blend.color.operation = WGPUBlendOperation_Add;
-    blend.color.srcFactor = WGPUBlendFactor_One;
-    blend.color.dstFactor = WGPUBlendFactor_One;
-    blend.alpha.operation = WGPUBlendOperation_Add;
-    blend.alpha.srcFactor = WGPUBlendFactor_One;
-    blend.alpha.dstFactor = WGPUBlendFactor_One;
+    wgpu::BlendState blend{};
+    blend.color.dstFactor = wgpu::BlendFactor::One;
+    blend.alpha.dstFactor = wgpu::BlendFactor::One;
 
-    WGPUColorTargetState colorTarget = {};
-    colorTarget.format = swapChainFormat;
+    wgpu::ColorTargetState colorTarget{};
+    colorTarget.format = GetPreferredSwapChainTextureFormat2();
     colorTarget.blend = &blend;
-    colorTarget.writeMask = WGPUColorWriteMask_All;
 
-    WGPUFragmentState fragment = {};
+    wgpu::FragmentState fragment{};
     fragment.module = fsModule;
     fragment.entryPoint = "main";
     fragment.targetCount = 1;
     fragment.targets = &colorTarget;
     descriptor.fragment = &fragment;
-
-    // Other state
-    descriptor.layout = nullptr;
-    descriptor.depthStencil = nullptr;
 
     descriptor.vertex.module = vsModule;
     descriptor.vertex.entryPoint = "main";
@@ -434,19 +395,58 @@ void init_dawn() {
     descriptor.multisample.mask = 0xFFFFFFFF;
     descriptor.multisample.alphaToCoverageEnabled = false;
 
-    descriptor.primitive.frontFace = WGPUFrontFace_CCW;
-    descriptor.primitive.cullMode = WGPUCullMode_None;
-    descriptor.primitive.topology = WGPUPrimitiveTopology_TriangleList;
-    descriptor.primitive.stripIndexFormat = WGPUIndexFormat_Undefined;
+    descriptor.primitive.frontFace = wgpu::FrontFace::CCW;
+    descriptor.primitive.cullMode = wgpu::CullMode::None;
+    descriptor.primitive.topology = wgpu::PrimitiveTopology::TriangleList;
+    descriptor.primitive.stripIndexFormat = wgpu::IndexFormat::Undefined;
 
-    pipeline = wgpuDeviceCreateRenderPipeline2(device, &descriptor);
+    pipeline = device.CreateRenderPipeline2(&descriptor);
   }
-
-  wgpuShaderModuleRelease(vsModule);
-  wgpuShaderModuleRelease(fsModule);
 }
 
-bool animate = false;
+void render_frame() {
+  static uint16_t fc = 0; // frame counter
+  fc++;
+  float RED   = 0.4;
+  float GREEN = 0.4;
+  float BLUE  = 0.4;
+  if (animate) {
+    RED   = abs(sinf(float(fc) / 100));
+    GREEN = abs(sinf(float(fc) / 90));
+    BLUE  = abs(cosf(float(fc) / 80));
+  }
+
+  wgpu::TextureView backbufferView = swapchain.GetCurrentTextureView();
+  wgpu::RenderPassDescriptor renderpassInfo;
+  wgpu::RenderPassColorAttachmentDescriptor colorAttachment;
+  {
+    colorAttachment.attachment = backbufferView;
+    colorAttachment.resolveTarget = nullptr;
+    colorAttachment.clearColor = {RED, GREEN, BLUE, 0.0f};
+    colorAttachment.loadOp = wgpu::LoadOp::Clear;
+    colorAttachment.storeOp = wgpu::StoreOp::Store;
+    renderpassInfo.colorAttachmentCount = 1;
+    renderpassInfo.colorAttachments = &colorAttachment;
+    renderpassInfo.depthStencilAttachment = nullptr;
+  }
+  wgpu::CommandBuffer commands;
+  {
+    wgpu::CommandEncoder encoder = device.CreateCommandEncoder(nullptr);
+    wgpu::RenderPassEncoder pass = encoder.BeginRenderPass(&renderpassInfo);
+    pass.SetPipeline(pipeline);
+    pass.Draw(3, 1, 0, 0);
+    pass.EndPass();
+    pass.Release();
+    commands = encoder.Finish(nullptr);
+  }
+
+  queue.Submit(1, &commands);
+  swapchain.Present();
+
+  if (!c2sBuf->Flush())
+    dlog("c2sBuf->Flush() failed");
+}
+
 
 // windowOnKeyPress is called when keyboard keys are pressed.
 //   window   The window that received the event.
@@ -470,7 +470,6 @@ void windowOnKeyPress(GLFWwindow* window, int key, int scancode, int action, int
   }
 }
 
-void frame();
 
 // onWindowFramebufferResize is called when a window's framebuffer has changed size
 //   window The window which framebuffer was resized.
@@ -478,7 +477,8 @@ void frame();
 //   height The new height, in pixels, of the framebuffer.
 void onWindowFramebufferResize(GLFWwindow* window, int width, int height) {
   //printf("onWindowFramebufferResize width=%d, height=%d\n", width, height);
-  //configureSwapchain(width, height);
+  flushWireBuffers();
+  configureSwapchain(width, height);
 }
 
 // onWindowResize is called when a window has been resized
@@ -489,7 +489,7 @@ void onWindowFramebufferResize(GLFWwindow* window, int width, int height) {
 void onWindowResize(GLFWwindow* window, int width, int height) {
   //printf("onWindowResize width=%d, height=%d\n", width, height);
   // redraw as onWindowFramebufferResize might have replaced the swapchain
-  // frame();
+  // render_frame();
 }
 
 
@@ -536,10 +536,10 @@ struct Client {
 const char* sockfile = "server.sock";
 Client* server_client0 = nullptr;
 
-// server_fd_cb is called when a server's connection to a client has available I/O
-static void server_client_fd_cb(RunLoop* rl, ev_io* w, int revents) {
+// onServerIO is called when a server's connection to a client has available I/O
+static void onClientIO(RunLoop* rl, ev_io* w, int revents) {
   Client* client = (Client*)w->data;
-  // dlog("server_client_fd_cb %s %s",
+  // dlog("onClientIO %s %s",
   //   revents & EV_READ ? "EV_READ" : "",
   //   revents & EV_WRITE ? "EV_WRITE" : "");
 
@@ -552,9 +552,9 @@ static void server_client_fd_cb(RunLoop* rl, ev_io* w, int revents) {
     if (n == 0) {
       dlog("client#%u gone", client->id);
       client->close();
-      // delete client;
-      // if (client == server_client0)
-      //   server_client0 = nullptr;
+      if (client == server_client0)
+        server_client0 = nullptr;
+      delete client;
       return;
     }
     // handle incoming data from client
@@ -566,7 +566,7 @@ static void server_client_fd_cb(RunLoop* rl, ev_io* w, int revents) {
     auto& b = client->wbuf;
     if (b.len != 0) {
       ssize_t z = ::write(fd, &b.p[b.len], b.len);
-      dlog("server_client_fd_cb write(%zu) => %zd", b.len, z);
+      dlog("onClientIO write(%zu) => %zd", b.len, z);
       if (z < b.len) {
         // shift remaining to 0
         size_t len2 = b.len - size_t(z);
@@ -585,9 +585,9 @@ static void server_client_fd_cb(RunLoop* rl, ev_io* w, int revents) {
   }
 }
 
-// server_fd_cb is called when data is readable, i.e. when a connection is awaiting accept
-static void server_fd_cb(RunLoop* rl, ev_io* w, int revents) {
-  dlog("server_fd_cb called");
+// onServerIO is called when data is readable, i.e. when a connection is awaiting accept
+static void onServerIO(RunLoop* rl, ev_io* w, int revents) {
+  dlog("onServerIO called");
   int fd = accept(w->fd, NULL, NULL);
   if (fd < 0) {
     if (errno != EAGAIN)
@@ -604,7 +604,7 @@ static void server_fd_cb(RunLoop* rl, ev_io* w, int revents) {
   client->io.data = (void*)client;
   dlog("accepted new connection client#%u [fd %d]", client->id, fd);
   //s2cBuf->w = fd;
-  ev_io_init(&client->io, server_client_fd_cb, fd, EV_READ);
+  ev_io_init(&client->io, onClientIO, fd, EV_READ);
   ev_io_start(rl, &client->io);
 
   // send welcome message
@@ -613,132 +613,75 @@ static void server_fd_cb(RunLoop* rl, ev_io* w, int revents) {
   // close(fd);
 }
 
-// another callback, this time for a time-out
-static void server_poll_timeout_cb(RunLoop* rl, ev_timer* w, int revents) {
+static void onPollTimeout(RunLoop* rl, ev_timer* w, int revents) {
   // dlog("poll timeout");
-  // w->repeat = 2.0;
-  // ev_timer_again(rl, w);
-  // ev_timer_stop(rl, w);
-}
-
-void server_runloop(int fd) {
-  dlog("main start");
-  RunLoop* rl = EV_DEFAULT;
-
-  FDSetNonBlock(fd);
-  ev_io server_fd_watcher;
-  ev_io_init(&server_fd_watcher, server_fd_cb, fd, EV_READ);
-  ev_io_start(rl, &server_fd_watcher);
-
-  ev_timer timeout_w;
-  ev_init(&timeout_w, server_poll_timeout_cb);
-
-  const uint32_t FPS = 5;
-  // double frameTimeGoal = 1.0 / 60.0;
-  double frameTimeGoal = 1.0 / (double)FPS;
-  timeout_w.repeat = frameTimeGoal;
-  ev_timer_again(rl, &timeout_w);
-  ev_unref(rl); // don't allow timer to keep runloop alive alone
-
-  const uint32_t frameTimingsSize = FPS;
-  double frameTimings[2][frameTimingsSize] = {{0}};
-  uint32_t frameCounter = 0;
-
-  // for some reason we need to do this once for things to work... why?
-  if (!c2sBuf->Flush())
-    dlog("c2sBuf->Flush failed");
-
-  // forever
-  while (!glfwWindowShouldClose(window) /*&& frameCounter < 10*/) {
-    // dlog("frame %u", frameCounter);
-    double t1 = glfwGetTime();
-    // if (server_client0)
-    //   server_client0->write("SYNC\n", 5);
-
-    // frame();
-
-    //if (!c2sBuf->Flush())
-    //  dlog("c2sBuf->Flush failed");
-
-    // dlog("frame %u", frameCounter);
-    // bool s2cSuccess = s2cBuf->Flush();
-    // assert(s2cSuccess);
-
-    double frameTime0 = glfwGetTime() - t1;
-
-    glfwPollEvents();
-
-    timeout_w.repeat = frameTimeGoal - (glfwGetTime() - t1);
-    if (timeout_w.repeat > 0.0) {
-      ev_timer_again(rl, &timeout_w);
-      ev_run(rl, EVRUN_ONCE);
-    } else {
-      ev_timer_stop(rl, &timeout_w);
-      ev_run(rl, EVRUN_NOWAIT);
-    }
-
-    double frameTime1 = glfwGetTime() - t1;
-
-    // update stats
-    frameTimings[0][frameCounter % frameTimingsSize] = frameTime0;
-    frameTimings[1][frameCounter % frameTimingsSize] = frameTime1;
-    frameCounter++;
-    if ((frameCounter % frameTimingsSize) == 0) {
-      double frameTimingsAvg[2] = {0.0, 0.0};
-      for (uint32_t i = 0; i < frameTimingsSize; i++) {
-        frameTimingsAvg[0] += frameTimings[0][i];
-        frameTimingsAvg[1] += frameTimings[1][i];
-      }
-      frameTimingsAvg[0] = frameTimingsAvg[0] / (double)frameTimingsSize;
-      frameTimingsAvg[1] = frameTimingsAvg[1] / (double)frameTimingsSize;
-      dlog("render %.2f ms   %.0f FPS (%.2f ms/frame)",
-        frameTimingsAvg[0] * 1000.0,
-        1 / frameTimingsAvg[1],
-        frameTimingsAvg[1] * 1000.0);
-    }
-  }
-
-  dlog("exit");
-  if (server_client0)
-    server_client0->close();
-  close(fd);
+  ev_timer_again(rl, w);
+  // render_frame(); // render locally
+  // swapchain.Present();
 }
 
 int main(int argc, const char* argv[]) {
   // create socket server
   dlog("starting UNIX socket server \"%s\"", sockfile);
-  int server_fd = createUNIXSocketServer(sockfile);
-  if (server_fd < 0) {
+  int fd = createUNIXSocketServer(sockfile);
+  if (fd < 0) {
     perror("createUNIXSocketServer");
     return 1;
   }
 
-  // init dawn
   init_dawn();
   glfwSetKeyCallback(window, windowOnKeyPress);
   glfwSetFramebufferSizeCallback(window, onWindowFramebufferResize);
   glfwSetWindowSizeCallback(window, onWindowResize);
 
-  // run server on the this current thread
-  server_runloop(server_fd);
+  RunLoop* rl = EV_DEFAULT;
 
+  // register I/O callback for the socket file descriptor
+  FDSetNonBlock(fd);
+  ev_io server_fd_watcher;
+  ev_io_init(&server_fd_watcher, onServerIO, fd, EV_READ);
+  ev_io_start(rl, &server_fd_watcher);
+
+  // use a timer to drive the runloop so we can call glfwPollEvents often enough
+  const uint32_t FPS = 60;
+  ev_timer timer;
+  ev_init(&timer, onPollTimeout);
+  timer.repeat = 1.0 / (double)FPS;
+  ev_timer_again(rl, &timer);
+  ev_unref(rl); // don't allow timer to keep runloop alive alone
+
+  // for some reason we need to do this once for things to work... why?
+  if (!c2sBuf->Flush())
+    dlog("c2sBuf->Flush failed");
+
+  // // stats
+  // double framestats[FPS] = {0};
+  // uint32_t frameCounter = 0;
+
+  while (!glfwWindowShouldClose(window)) {
+    double t1 = glfwGetTime();
+    glfwPollEvents(); // check for OS events
+    ev_run(rl, EVRUN_ONCE); // poll for I/O events
+
+    // // update stats
+    // framestats[frameCounter % FPS] = glfwGetTime() - t1;
+    // frameCounter++;
+    // if ((frameCounter % FPS) == 0) {
+    //   double avgtime = 0.0;
+    //   for (uint32_t i = 0; i < FPS; i++) {
+    //     avgtime += framestats[i];
+    //   }
+    //   avgtime = avgtime / (double)FPS;
+    //   dlog("%.1f ms/frame  (%.0f FPS)", avgtime * 1000.0, 1.0 / avgtime);
+    // }
+  }
+
+  dlog("exit");
+  if (server_client0)
+    server_client0->close();
+  ev_io_stop(rl, &server_fd_watcher);
+  ev_timer_stop(rl, &timer);
+  close(fd);
   unlink(sockfile);
+  return 0;
 }
-
-  // // server read loop
-  // char buf[256];
-  // while (1) {
-  //   printf("server calling read(server.r) ...\n");
-  //   int r = ::read(server.r, buf, 256);
-  //   printf("server read() => %d\n", r);
-  //   if (r < 1) {
-  //     if (r == -1)
-  //       perror("server read");
-  //     // I/O closed; exit client
-  //     break;
-  //   }
-  // }
-
-// Note: To update render size when window changes, poll window with glfwGetFramebufferSize
-// and retrieve an updated swapchain via wgpuDeviceCreateSwapChain.
-// See SyncFromWindow() in dawn/examples/ManualSwapChainTest.cpp for an implementation.

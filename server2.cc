@@ -244,6 +244,15 @@ static void PrintGLFWError(int code, const char* message) {
 }
 
 
+void flushWireBuffers() {
+  bool s2cSuccess = s2cBuf->Flush();
+  ASSERT(s2cSuccess);
+}
+
+
+void configureSwapchain(int width, int height);
+
+
 // onKeyPress is called when keyboard keys are pressed.
 //   window   The window that received the event.
 //   key      The keyboard key that was pressed or released. (GLFW_KEY_*)
@@ -362,12 +371,6 @@ wgpu::Device createDawnDevice() {
   dawnProcSetProcs(&procs);
   procs.deviceSetUncapturedErrorCallback(cDevice, PrintDeviceError, nullptr);
   return wgpu::Device::Acquire(cDevice);
-}
-
-
-void flushWireBuffers() {
-  bool s2cSuccess = s2cBuf->Flush();
-  ASSERT(s2cSuccess);
 }
 
 

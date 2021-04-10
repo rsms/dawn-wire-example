@@ -131,7 +131,6 @@ class LolCommandBuffer : public dawn_wire::CommandSerializer {
   char                       mBuffer[COMMAND_BUFFER_SIZE];
   const char*                mName = "";
 public:
-  int r = -1; // file descriptor to read from
   int w = -1; // file descriptor to write to
 
   LolCommandBuffer(const char* name) : mName(name) {}
@@ -173,11 +172,8 @@ public:
   }
 };
 
-static std::unique_ptr<dawn_native::Instance> instance;
-
 static dawn_wire::WireClient* wireClient = nullptr;
 static LolCommandBuffer* c2sBuf = nullptr;
-
 
 static WGPUDevice         device;
 static WGPUQueue          queue;
@@ -210,10 +206,6 @@ static void PrintDeviceError(WGPUErrorType errorType, const char* message, void*
 
 
 wgpu::Device createWebGPUDevice() {
-  instance = std::make_unique<dawn_native::Instance>();
-  // utils::DiscoverAdapter(instance.get(), window, backendType);
-  instance->DiscoverDefaultAdapters();
-
   DawnProcTable procs;
 
   c2sBuf = new LolCommandBuffer("c2s");
@@ -223,7 +215,6 @@ wgpu::Device createWebGPUDevice() {
   procs = dawn_wire::client::GetProcs();
 
   auto deviceReservation = wireClient->ReserveDevice();
-  //wireServer->InjectDevice(backendDevice, deviceReservation.id, deviceReservation.generation);
 
   WGPUDevice cDevice = deviceReservation.device;
 

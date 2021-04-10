@@ -244,23 +244,29 @@ static void PrintGLFWError(int code, const char* message) {
 }
 
 
-wgpu::Device createCppDawnDevice() {
+void createOSWindow() {
+  assert(window == nullptr);
+
   glfwSetErrorCallback(PrintGLFWError);
-  if (!glfwInit()) {
-    return wgpu::Device();
-  }
+  if (!glfwInit())
+    return;
 
   // Create the test window and discover adapters using it (esp. for OpenGL)
   utils::SetupGLFWWindowHintsForBackend(backendType);
   glfwWindowHint(GLFW_COCOA_RETINA_FRAMEBUFFER, GLFW_FALSE);
-  GLFWmonitor* monitor = nullptr;
-  window = glfwCreateWindow(640, 480, "hello-wire", monitor, nullptr);
+  window = glfwCreateWindow(640, 480, "hello-wire", /*monitor*/nullptr, nullptr);
   if (!window)
-    return wgpu::Device();
+    return;
 
   // [rsms] move window to bottom right corner of screen
   // glfwSetWindowPos(window, 1920, 960);
   glfwSetWindowPos(window, 2560, 960); // 2nd screen, bottom left corner
+}
+
+
+wgpu::Device createDawnDevice() {
+  if (window == nullptr)
+    return wgpu::Device();
 
   instance = std::make_unique<dawn_native::Instance>();
   utils::DiscoverAdapter(instance.get(), window, backendType);
@@ -283,9 +289,8 @@ wgpu::Device createCppDawnDevice() {
   DawnProcTable backendProcs = dawn_native::GetProcs();
 
   binding = utils::CreateBinding(backendType, window, backendDevice);
-  if (binding == nullptr) {
+  if (binding == nullptr)
     return wgpu::Device();
-  }
 
   c2sBuf = new LolCommandBuffer("c2s");
   s2cBuf = new LolCommandBuffer("s2c");
@@ -337,7 +342,7 @@ void configureSwapchain(int width, int height) {
 
 
 void init_dawn() {
-  device = createCppDawnDevice();
+  device = createDawnDevice();
   queue = device.GetQueue();
 
   int width = 100;
@@ -367,41 +372,39 @@ void init_dawn() {
     "}\n";
   wgpu::ShaderModule fsModule = utils::CreateShaderModule(device, fs);
 
-  {
-    wgpu::RenderPipelineDescriptor2 descriptor{};
+  wgpu::RenderPipelineDescriptor2 descriptor;
 
-    // Fragment state
-    wgpu::BlendState blend{};
-    blend.color.dstFactor = wgpu::BlendFactor::One;
-    blend.alpha.dstFactor = wgpu::BlendFactor::One;
+  // Fragment state
+  wgpu::BlendState blend;
+  blend.color.dstFactor = wgpu::BlendFactor::One;
+  blend.alpha.dstFactor = wgpu::BlendFactor::One;
 
-    wgpu::ColorTargetState colorTarget{};
-    colorTarget.format = GetPreferredSwapChainTextureFormat2();
-    colorTarget.blend = &blend;
+  wgpu::ColorTargetState colorTarget;
+  colorTarget.format = GetPreferredSwapChainTextureFormat2();
+  colorTarget.blend = &blend;
 
-    wgpu::FragmentState fragment{};
-    fragment.module = fsModule;
-    fragment.entryPoint = "main";
-    fragment.targetCount = 1;
-    fragment.targets = &colorTarget;
-    descriptor.fragment = &fragment;
+  wgpu::FragmentState fragment;
+  fragment.module = fsModule;
+  fragment.entryPoint = "main";
+  fragment.targetCount = 1;
+  fragment.targets = &colorTarget;
+  descriptor.fragment = &fragment;
 
-    descriptor.vertex.module = vsModule;
-    descriptor.vertex.entryPoint = "main";
-    descriptor.vertex.bufferCount = 0;
-    descriptor.vertex.buffers = nullptr;
+  descriptor.vertex.module = vsModule;
+  descriptor.vertex.entryPoint = "main";
+  descriptor.vertex.bufferCount = 0;
+  descriptor.vertex.buffers = nullptr;
 
-    descriptor.multisample.count = 1;
-    descriptor.multisample.mask = 0xFFFFFFFF;
-    descriptor.multisample.alphaToCoverageEnabled = false;
+  descriptor.multisample.count = 1;
+  descriptor.multisample.mask = 0xFFFFFFFF;
+  descriptor.multisample.alphaToCoverageEnabled = false;
 
-    descriptor.primitive.frontFace = wgpu::FrontFace::CCW;
-    descriptor.primitive.cullMode = wgpu::CullMode::None;
-    descriptor.primitive.topology = wgpu::PrimitiveTopology::TriangleList;
-    descriptor.primitive.stripIndexFormat = wgpu::IndexFormat::Undefined;
+  descriptor.primitive.frontFace = wgpu::FrontFace::CCW;
+  descriptor.primitive.cullMode = wgpu::CullMode::None;
+  descriptor.primitive.topology = wgpu::PrimitiveTopology::TriangleList;
+  descriptor.primitive.stripIndexFormat = wgpu::IndexFormat::Undefined;
 
-    pipeline = device.CreateRenderPipeline2(&descriptor);
-  }
+  pipeline = device.CreateRenderPipeline2(&descriptor);
 }
 
 void render_frame() {
@@ -419,26 +422,23 @@ void render_frame() {
   wgpu::TextureView backbufferView = swapchain.GetCurrentTextureView();
   wgpu::RenderPassDescriptor renderpassInfo;
   wgpu::RenderPassColorAttachmentDescriptor colorAttachment;
-  {
-    colorAttachment.attachment = backbufferView;
-    colorAttachment.resolveTarget = nullptr;
-    colorAttachment.clearColor = {RED, GREEN, BLUE, 0.0f};
-    colorAttachment.loadOp = wgpu::LoadOp::Clear;
-    colorAttachment.storeOp = wgpu::StoreOp::Store;
-    renderpassInfo.colorAttachmentCount = 1;
-    renderpassInfo.colorAttachments = &colorAttachment;
-    renderpassInfo.depthStencilAttachment = nullptr;
-  }
+  colorAttachment.attachment = backbufferView;
+  colorAttachment.resolveTarget = nullptr;
+  colorAttachment.clearColor = {RED, GREEN, BLUE, 0.0f};
+  colorAttachment.loadOp = wgpu::LoadOp::Clear;
+  colorAttachment.storeOp = wgpu::StoreOp::Store;
+  renderpassInfo.colorAttachmentCount = 1;
+  renderpassInfo.colorAttachments = &colorAttachment;
+  renderpassInfo.depthStencilAttachment = nullptr;
+
   wgpu::CommandBuffer commands;
-  {
-    wgpu::CommandEncoder encoder = device.CreateCommandEncoder(nullptr);
-    wgpu::RenderPassEncoder pass = encoder.BeginRenderPass(&renderpassInfo);
-    pass.SetPipeline(pipeline);
-    pass.Draw(3, 1, 0, 0);
-    pass.EndPass();
-    pass.Release();
-    commands = encoder.Finish(nullptr);
-  }
+  wgpu::CommandEncoder encoder = device.CreateCommandEncoder(nullptr);
+  wgpu::RenderPassEncoder pass = encoder.BeginRenderPass(&renderpassInfo);
+  pass.SetPipeline(pipeline);
+  pass.Draw(3, 1, 0, 0);
+  pass.EndPass();
+  pass.Release();
+  commands = encoder.Finish(nullptr);
 
   queue.Submit(1, &commands);
   swapchain.Present();
@@ -609,8 +609,6 @@ static void onServerIO(RunLoop* rl, ev_io* w, int revents) {
 
   // send welcome message
   client->write("OHAI\n", 5);
-
-  // close(fd);
 }
 
 static void onPollTimeout(RunLoop* rl, ev_timer* w, int revents) {
@@ -628,6 +626,8 @@ int main(int argc, const char* argv[]) {
     perror("createUNIXSocketServer");
     return 1;
   }
+
+  createOSWindow();
 
   init_dawn();
   glfwSetKeyCallback(window, windowOnKeyPress);
@@ -659,7 +659,7 @@ int main(int argc, const char* argv[]) {
   // uint32_t frameCounter = 0;
 
   while (!glfwWindowShouldClose(window)) {
-    double t1 = glfwGetTime();
+    //double t1 = glfwGetTime(); // measure time for stats
     glfwPollEvents(); // check for OS events
     ev_run(rl, EVRUN_ONCE); // poll for I/O events
 

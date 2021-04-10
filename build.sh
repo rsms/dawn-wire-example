@@ -97,10 +97,10 @@ if [ -n "$OPT_RUN" ]; then
 fi
 
 FSWATCH_ARGS=()
-if [[ "$@" == *"a-client"* && "$@" != *"a-server"* ]]; then
-  FSWATCH_ARGS=( "$USER_PWD/a-client.cc" )
-elif [[ "$@" == *"a-server"* && "$@" != *"a-client"* ]]; then
-  FSWATCH_ARGS=( "$USER_PWD/a-server.cc" )
+if [[ "$@" == *"client"* && "$@" != *"server"* ]]; then
+  FSWATCH_ARGS=( "$USER_PWD"/client*.cc )
+elif [[ "$@" == *"server"* && "$@" != *"client"* ]]; then
+  FSWATCH_ARGS=( "$USER_PWD"/server*.cc )
 else
   FSWATCH_ARGS=( --exclude='.*' --include='\.(c|cc|cpp|h|s|S)$' "$USER_PWD" )
 fi

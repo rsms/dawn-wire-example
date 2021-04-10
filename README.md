@@ -24,11 +24,11 @@ with the following traits:
 Watch-build-run mode is available with `-w` and `-run` to the build script:
 
 ```sh
-./build.sh -w -run=./out/debug/a-server -- a-server
+./build.sh -w -run=./out/debug/server server
 ```
 
 ```sh
-./build.sh -w -run=./out/debug/a-client -- a-client
+./build.sh -w -run=./out/debug/client client
 ```
 
 Note: `-w` requires `fswatch` to be installed.

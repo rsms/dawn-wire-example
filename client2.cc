@@ -127,15 +127,13 @@ int connectUNIXSocket(const char* filename) {
 
 DawnClientServerProtocol proto;
 
+dawn_wire::WireClient* wireClient = nullptr;
 
-static dawn_wire::WireClient* wireClient = nullptr;
-// static LolCommandBuffer* c2sBuf = nullptr;
-
-static WGPUDevice         device;
-static WGPUQueue          queue;
-static WGPUSwapChain      swapchain;
-static WGPURenderPipeline pipeline;
-static WGPUTextureFormat  swapChainFormat;
+WGPUDevice         device;
+WGPUQueue          queue;
+WGPURenderPipeline pipeline;
+// WGPUSwapChain      swapchain;
+// WGPUTextureFormat  swapChainFormat;
 
 
 static void PrintDeviceError(WGPUErrorType errorType, const char* message, void*) {
@@ -164,19 +162,17 @@ static void PrintDeviceError(WGPUErrorType errorType, const char* message, void*
 wgpu::Device createWebGPUDevice() {
   DawnProcTable procs;
 
-  //c2sBuf = new LolCommandBuffer("c2s");
   dawn_wire::WireClientDescriptor clientDesc = {};
   clientDesc.serializer = &proto;
   wireClient = new dawn_wire::WireClient(clientDesc);
   procs = dawn_wire::client::GetProcs();
 
   auto deviceReservation = wireClient->ReserveDevice();
-
-  WGPUDevice cDevice = deviceReservation.device;
+  WGPUDevice device = deviceReservation.device;
 
   dawnProcSetProcs(&procs);
-  procs.deviceSetUncapturedErrorCallback(cDevice, PrintDeviceError, nullptr);
-  return wgpu::Device::Acquire(cDevice);
+  procs.deviceSetUncapturedErrorCallback(device, PrintDeviceError, nullptr);
+  return wgpu::Device::Acquire(device);
 }
 
 
@@ -187,30 +183,28 @@ void flushWireBuffers() {
 }
 
 
-void configureSwapchain(int width, int height) {
-  WGPUSwapChainDescriptor descriptor = {};
-  // descriptor.implementation = binding->GetSwapChainImplementation();
-  //descriptor.implementation = dawn_native::null::CreateNativeSwapChainImpl();
-  descriptor.format = WGPUTextureFormat_RGBA8Unorm;
-  descriptor.presentMode = WGPUPresentMode_Immediate;
-  swapchain = wgpuDeviceCreateSwapChain(device, nullptr, &descriptor);
+// void configureSwapchain(int width, int height) {
+//   WGPUSwapChainDescriptor descriptor = {};
+//   // descriptor.implementation = binding->GetSwapChainImplementation();
+//   //descriptor.implementation = dawn_native::null::CreateNativeSwapChainImpl();
+//   descriptor.format = WGPUTextureFormat_RGBA8Unorm;
+//   descriptor.presentMode = WGPUPresentMode_Immediate;
+//   swapchain = wgpuDeviceCreateSwapChain(device, nullptr, &descriptor);
 
-  // wgpu::TextureFormat textureFormat = static_cast<wgpu::TextureFormat>(
-  //   binding->GetPreferredSwapChainTextureFormat())
-  // swapChainFormat = static_cast<WGPUTextureFormat>(textureFormat);
+//   // wgpu::TextureFormat textureFormat = static_cast<wgpu::TextureFormat>(
+//   //   binding->GetPreferredSwapChainTextureFormat())
+//   // swapChainFormat = static_cast<WGPUTextureFormat>(textureFormat);
 
-  // swapChainFormat = WGPUTextureFormat_RGBA8Unorm;
-  wgpuSwapChainConfigure(swapchain, descriptor.format, WGPUTextureUsage_RenderAttachment,
-    width, height);
-}
+//   swapChainFormat = WGPUTextureFormat_RGBA8Unorm;
+//   wgpuSwapChainConfigure(swapchain, descriptor.format, WGPUTextureUsage_RenderAttachment,
+//     width, height);
+// }
 
 
 void init_dawn() {
-  // device = CreateCppDawnDevice().Release();
-  // device = createWebGPUDevice().Release();
   queue = wgpuDeviceGetQueue(device);
 
-  configureSwapchain(640, 480);
+  //configureSwapchain(640, 480);
 
   const char* vs =
     "[[builtin(vertex_index)]] var<in> VertexIndex : u32;\n"
@@ -247,7 +241,7 @@ void init_dawn() {
     blend.alpha.dstFactor = WGPUBlendFactor_One;
 
     WGPUColorTargetState colorTarget = {};
-    colorTarget.format = swapChainFormat;
+    colorTarget.format = WGPUTextureFormat_RGBA8Unorm;
     colorTarget.blend = &blend;
     colorTarget.writeMask = WGPUColorWriteMask_All;
 
@@ -287,8 +281,18 @@ uint32_t fc = 0;
 bool animate = true;
 
 
-void render_frame(WGPUTexture reservedTexture) {
+void render_frame() {
   fc++;
+  fprintf(stderr, "\n");
+  dlog("FRAME %u", fc);
+
+  // reserve a texture
+  static dawn_wire::ReservedTexture reservedTexture;
+  //wireClient->ReclaimTextureReservation(reservedTexture);
+  if (reservedTexture.texture == nullptr) {
+    reservedTexture = wireClient->ReserveTexture(device);
+  }
+
   float RED   = 0.4;
   float GREEN = 0.4;
   float BLUE  = 0.4;
@@ -298,7 +302,9 @@ void render_frame(WGPUTexture reservedTexture) {
     BLUE  = abs(cosf(float(fc) / 80));
   }
 
-  WGPUTextureView backbufferView = wgpuSwapChainGetCurrentTextureView(swapchain);
+  //WGPUTextureView backbufferView = wgpuSwapChainGetCurrentTextureView(swapchain);
+
+  // This cases a segfault in the server when it receives the command buffer:
   // WGPUTextureViewDescriptor textDescr = {
   //   .label = "a",
   //   .format = WGPUTextureFormat_RGBA8Unorm,
@@ -309,15 +315,16 @@ void render_frame(WGPUTexture reservedTexture) {
   //   .arrayLayerCount = 0,
   //   .aspect = WGPUTextureAspect_All,
   // };
-  // WGPUTextureView backbufferView = wgpuTextureCreateView(reservedTexture, &textDescr);
+  // WGPUTextureView backbufferView = wgpuTextureCreateView(reservedTexture.texture, &textDescr);
 
-  WGPURenderPassDescriptor renderpassInfo = {};
   WGPURenderPassColorAttachmentDescriptor colorAttachment = {};
-  colorAttachment.attachment = backbufferView;
+  //colorAttachment.attachment = backbufferView;
   colorAttachment.resolveTarget = nullptr;
   colorAttachment.clearColor = {RED, GREEN, BLUE, 0.0f};
   colorAttachment.loadOp = WGPULoadOp_Clear;
   colorAttachment.storeOp = WGPUStoreOp_Store;
+
+  WGPURenderPassDescriptor renderpassInfo = {};
   renderpassInfo.colorAttachmentCount = 1;
   renderpassInfo.colorAttachments = &colorAttachment;
   renderpassInfo.depthStencilAttachment = nullptr;
@@ -334,7 +341,7 @@ void render_frame(WGPUTexture reservedTexture) {
   wgpuQueueSubmit(queue, 1, &commands);
   wgpuCommandBufferRelease(commands);
   // wgpuSwapChainPresent(swapchain);
-  wgpuTextureViewRelease(backbufferView);
+  // wgpuTextureViewRelease(backbufferView);
 
   // // tell server we are writing a new frame
   // int fd = c2sBuf->w;
@@ -362,8 +369,6 @@ enum ReadState {
   DawnWireBody,
 };
 
-dawn_wire::ReservedTexture reservedTexture;
-
 
 void runloop_main(int fd) {
   RunLoop* rl = EV_DEFAULT;
@@ -377,23 +382,10 @@ void runloop_main(int fd) {
   //c2sBuf->w = fd;
 
   proto.onFrame = []() {
-    dlog("onFrame");
-    // reserve a texture
-    //struct ReservedTexture {
-    //    WGPUTexture texture;
-    //    uint32_t id;
-    //    uint32_t generation;
-    //    uint32_t deviceId;
-    //    uint32_t deviceGeneration;
-    //};
-    if (reservedTexture.texture != nullptr)
-      wireClient->ReclaimTextureReservation(reservedTexture);
-    reservedTexture = wireClient->ReserveTexture(device);
-
-    render_frame(reservedTexture.texture);
+    render_frame();
   };
   proto.onDawnBuffer = [](const void* data, size_t len) {
-    dlog("onDawnBuffer len=%zu", len);
+    dlog("TODO onDawnBuffer len=%zu", len);
   };
   proto.start(rl, fd);
 

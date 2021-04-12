@@ -391,7 +391,6 @@ void dumpLogAvailableAdapters(dawn_native::Instance* instance) {
 
 
 dawn_native::Adapter backendAdapter;
-std::vector<std::pair<uint32_t,uint32_t>> known_devices; // pair of <devId,devGen>
 
 
 WGPUDevice allocateClientDevice() {
@@ -399,8 +398,8 @@ WGPUDevice allocateClientDevice() {
   //   https://source.chromium.org/chromium/chromium/src/+/master:gpu/command_buffer/service/webgpu_decoder_impl.cc;drc=8ca5d3a5f1d3e18b363549c0edd4c2494cfb70ea;l=519?q=webgpu_deco
   //   https://source.chromium.org/chromium/chromium/src/+/master:gpu/command_buffer/service/webgpu_decoder_impl.cc;l=843?q=webgpu_deco
   //
-  uint32_t devId = 1; // values from calling WireClient.ReserveDevice()
-  uint32_t devGen = 0;
+  uint32_t reservationId = 1; // values from calling WireClient.ReserveDevice()
+  uint32_t reservationGen = 0;
 
   dawn_native::DeviceDescriptor devdescr;
   // devdescr.requiredExtensions.push_back("texture_compression_bc");
@@ -414,7 +413,15 @@ WGPUDevice allocateClientDevice() {
     return nullptr;
 
   assert(wireServer != nullptr);
-  if (!wireServer->InjectDevice(device, devId, devGen)) {
+  // Re wireServer->InjectDevice:
+  //   the only code path in Server::InjectDevice that fails is when
+  //   Server::DeviceObjects().Allocate(id) fails which is defined in auto-generated
+  //   code at {out}/dawn/gen/src/dawn_wire/server/ServerBase_autogen.h
+  //   where DeviceObjects() is really just an accessor to KnownObjects<WGPUDevice> mKnownDevice
+  //   which in turn is defined in dawn/src/dawn_wire/server/ObjectStorage.h which
+  //   implementation fails if (id == 0 || id > mKnown.size()) or the device is already allocated.
+  if (!wireServer->InjectDevice(device, reservationId, reservationGen)) {
+    dlog("wireServer->InjectDevice FAILED");
     wgpuDeviceRelease(device);
     return nullptr;
   }
@@ -422,13 +429,11 @@ WGPUDevice allocateClientDevice() {
   // Device injection takes a ref. The wire now owns the device so release it.
   dawn_native::GetProcs().deviceRelease(device);
 
-  // Save the id and generation of the device. Now, we can query the server for
-  // this pair to discover if this device has been destroyed. The list will be
-  // checked in PerformPollingWork to tick all the live devices and remove all
-  // the dead ones.
-  known_devices.emplace_back(devId, devGen);
   return device;
 }
+
+
+const DawnProcTable* gProcs;
 
 
 wgpu::Device createDawnDevice() {
@@ -460,6 +465,7 @@ wgpu::Device createDawnDevice() {
   }
 
   DawnProcTable backendProcs = dawn_native::GetProcs();
+  gProcs = &backendProcs; // global var
 
   // wire server
   s2cBuf = new LolCommandBuffer("s2c");
@@ -643,10 +649,55 @@ void onPollTimeout(RunLoop* rl, ev_timer* w, int revents) {
   // swapchain.Present();
 }
 
+struct FakeTexture {
+  // copied from dawn/out/Release/gen/src/dawn/mock_webgpu.cpp
+  // as used by dawn/src/tests/unittests/wire/WireInjectTextureTests.cpp
+  const DawnProcTable* procs = gProcs;
+  WGPUBufferMapCallback mBufferMapAsyncCallback = nullptr;
+  WGPUCreateComputePipelineAsyncCallback mDeviceCreateComputePipelineAsyncCallback = nullptr;
+  WGPUCreateRenderPipelineAsyncCallback mDeviceCreateRenderPipelineAsyncCallback = nullptr;
+  WGPUErrorCallback mDevicePopErrorScopeCallback = nullptr;
+  WGPUDeviceLostCallback mDeviceSetDeviceLostCallbackCallback = nullptr;
+  WGPUErrorCallback mDeviceSetUncapturedErrorCallbackCallback = nullptr;
+  WGPUFenceOnCompletionCallback mFenceOnCompletionCallback = nullptr;
+  WGPUQueueWorkDoneCallback mQueueOnSubmittedWorkDoneCallback = nullptr;
+  WGPUCompilationInfoCallback mShaderModuleGetCompilationInfoCallback = nullptr;
+  void* userdata = 0;
+};
+
+static WGPUTexture GetNewTexture() {
+  return reinterpret_cast<WGPUTexture>(new FakeTexture);
+}
+
+
 void onFrameTimer(RunLoop* rl, ev_timer* w, int revents) {
   if (conn0) {
-    swapchain.Present();
-    wgpu::TextureView backbufferView = swapchain.GetCurrentTextureView();
+    fprintf(stderr, "\n");
+    dlog("FRAME");
+    static WGPUTexture apiTexture = nullptr;
+
+    if (apiTexture == nullptr) {
+      apiTexture = GetNewTexture();
+
+      // expect client to call wireClient->ReserveTexture when it gets a FRAME message
+      uint32_t id = 1;
+      uint32_t generation = 0;
+      uint32_t deviceId = 1;         // should match reservationId in allocateClientDevice()
+      uint32_t deviceGeneration = 0; // should match servationGen in allocateClientDevice()
+      if (wireServer->InjectTexture(apiTexture, id, generation, deviceId, deviceGeneration)) {
+        dlog("wireServer->InjectTexture OK");
+      } else {
+        dlog("wireServer->InjectTexture FAILED");
+      }
+    } else {
+      swapchain.Present();
+      // delete reinterpret_cast<FakeTexture*>(apiTexture);
+    }
+
+    static wgpu::TextureView backbufferView;
+    backbufferView = swapchain.GetCurrentTextureView();
+
+    // send FRAME message to client
     conn0->proto.writeFrame();
   }
   ev_timer_again(rl, w);
@@ -680,37 +731,16 @@ int main(int argc, const char* argv[]) {
   ev_unref(rl); // don't allow timer to keep runloop alive alone
 
   // use a timer to drive the runloop so we can call glfwPollEvents often enough
-  const uint32_t FPS = 60;
   ev_timer timer;
   ev_init(&timer, onPollTimeout);
-  timer.repeat = 1.0 / (double)FPS;
+  timer.repeat = 1.0 / 60.0;
   ev_timer_again(rl, &timer);
   ev_unref(rl); // don't allow timer to keep runloop alive alone
-
-  //// for some reason we need to do this once for things to work... why?
-  //if (!c2sBuf->Flush())
-  //  dlog("c2sBuf->Flush failed");
-
-  // // stats
-  // double framestats[FPS] = {0};
-  // uint32_t frameCounter = 0;
 
   while (!glfwWindowShouldClose(window)) {
     //double t1 = glfwGetTime(); // measure time for stats
     glfwPollEvents(); // check for OS events
     ev_run(rl, EVRUN_ONCE); // poll for I/O events
-
-    // // update stats
-    // framestats[frameCounter % FPS] = glfwGetTime() - t1;
-    // frameCounter++;
-    // if ((frameCounter % FPS) == 0) {
-    //   double avgtime = 0.0;
-    //   for (uint32_t i = 0; i < FPS; i++) {
-    //     avgtime += framestats[i];
-    //   }
-    //   avgtime = avgtime / (double)FPS;
-    //   dlog("%.1f ms/frame  (%.0f FPS)", avgtime * 1000.0, 1.0 / avgtime);
-    // }
   }
 
   dlog("exit");

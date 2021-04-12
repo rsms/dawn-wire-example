@@ -59,9 +59,9 @@ bool DawnClientServerProtocol::maybeFlushIncomingDawnCmd() {
 }
 
 void DawnClientServerProtocol::doIO(int revents) {
-  dlog("onConnIO %s %s",
-    revents & EV_READ ? "EV_READ" : "",
-    revents & EV_WRITE ? "EV_WRITE" : "");
+  // dlog("onConnIO %s %s",
+  //   revents & EV_READ ? "EV_READ" : "",
+  //   revents & EV_WRITE ? "EV_WRITE" : "");
 
   if (revents & EV_READ) {
     ssize_t n = _rbuf.addRead(_io.fd, _rbuf.cap()) > 0;

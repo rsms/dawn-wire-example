@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "protocol.hh"
+
 #include "dawn/examples/SampleUtils.h"
 
 #include "utils/BackendBinding.h"
@@ -36,14 +38,6 @@
 #include <sys/un.h>
 #include <fcntl.h> // F_GETFL, O_NONBLOCK etc
 
-// silence "mangled name of 'ev_set_allocator' will change in C++17"
-_Pragma("GCC diagnostic push")
-_Pragma("GCC diagnostic ignored \"-Wc++17-compat-mangling\"")
-#include <ev.h>
-_Pragma("GCC diagnostic pop")
-
-typedef struct ev_loop RunLoop;
-
 #define DLOG_PREFIX "\e[1;34m[server2]\e[0m "
 
 #ifdef DEBUG
@@ -60,6 +54,25 @@ typedef struct ev_loop RunLoop;
   #define errlog(format, ...) \
 (({ fprintf(stderr, "E " format "\n", ##__VA_ARGS__); fflush(stderr); }))
 #endif
+
+
+// Integer align2<T>(Integer n, Integer w)
+// rounds up n to closest boundary w (w must be a power of two)
+//
+// E.g.
+//   align2(0, 4) => 0
+//   align2(1, 4) => 4
+//   align2(2, 4) => 4
+//   align2(3, 4) => 4
+//   align2(4, 4) => 4
+//   align2(5, 4) => 8
+//   ...
+//
+#define align2(n,w) ({ \
+  assert(((w) & ((w) - 1)) == 0); /* alignment w is not a power of two */ \
+  ((n) + ((w) - 1)) & ~((w) - 1); \
+})
+
 
 static bool FDSetNonBlock(int fd) {
   #ifdef _WIN32
@@ -123,7 +136,6 @@ int connectUNIXSocket(const char* filename) {
 }
 
 
-
 // backendType
 // Default to D3D12, Metal, Vulkan, OpenGL in that order as D3D12 and Metal are the preferred on
 // their respective platforms, and Vulkan is preferred to OpenGL
@@ -140,10 +152,41 @@ static wgpu::BackendType backendType = wgpu::BackendType::OpenGL;
 #endif
 
 
+static dawn_wire::WireServer* wireServer = nullptr;
+
+
+// Conn is a connection to a client
+struct Conn {
+  uint32_t id;
+
+  DawnClientServerProtocol proto;
+
+  Conn(uint32_t id_) : id(id_) {
+    proto.onDawnBuffer = [](const char* data, size_t len) {
+      dlog("onDawnBuffer len=%zu", len);
+      assert(data != nullptr);
+      assert(wireServer != nullptr);
+      if (wireServer->HandleCommands(data, len) == nullptr)
+        dlog("wireServer->HandleCommands FAILED");
+    };
+  }
+
+  void close() {
+    proto.stop();
+    if (proto.fd() != -1)
+      ::close(proto.fd());
+  }
+};
+
+
 #define COMMAND_BUFFER_SIZE 4096*32
 
+const char* sockfile = "server.sock";
+Conn* conn0 = nullptr;
+
+
 class LolCommandBuffer : public dawn_wire::CommandSerializer {
-  dawn_wire::CommandHandler* mHandler = nullptr;
+  //dawn_wire::CommandHandler* mHandler = nullptr;
   size_t                     mOffset = 0;
   char                       mBuffer[COMMAND_BUFFER_SIZE];
   const char*                mName = "";
@@ -151,9 +194,8 @@ public:
   int w = -1; // file descriptor to write to
 
   LolCommandBuffer(const char* name) : mName(name) {}
-  LolCommandBuffer(dawn_wire::CommandHandler* handler) : mHandler(handler) {}
-
-  void SetHandler(dawn_wire::CommandHandler* handler) { mHandler = handler; }
+  //LolCommandBuffer(dawn_wire::CommandHandler* handler) : mHandler(handler) {}
+  //void SetHandler(dawn_wire::CommandHandler* handler) { mHandler = handler; }
 
   size_t GetMaximumAllocationSize() const override {
     return sizeof(mBuffer);
@@ -172,28 +214,14 @@ public:
   }
 
   bool Flush() override {
-    if (mOffset == 0)
-      return true;
-    bool success = true;
-    success = mHandler->HandleCommands(mBuffer, mOffset) != nullptr;
-    if (!success) {
-      dlog("cmd buffer %s HandleCommands (%zu) FAILED", mName, mOffset);
-    } else {
-      dlog("cmd buffer %s HandleCommands (%zu) OK", mName, mOffset);
+    if (mOffset > 0) {
+      dlog("cmd buffer %s Flush writing %zu bytes", mName, mOffset);
+      // bool success = mHandler->HandleCommands(mBuffer, mOffset) != nullptr;
+      if (!conn0->proto.writeDawnCommands(mBuffer, mOffset))
+        return false;
+      mOffset = 0;
     }
-    if (w != -1) {
-      dlog("cmd buffer %s Flush write %zu bytes", mName, mOffset);
-      ssize_t z = ::write(w, mBuffer, mOffset);
-      if (size_t(z) != mOffset) {
-        perror("cmd buffer Flush write");
-        success = false;
-      }
-    }
-    //else {
-    //  dlog("cmd buffer %s Flush skipping write since w=-1", mName);
-    //}
-    mOffset = 0;
-    return success;
+    return true;
   }
 };
 
@@ -201,10 +229,9 @@ static std::unique_ptr<dawn_native::Instance> instance;
 static utils::BackendBinding*                 binding = nullptr;
 static GLFWwindow*                            window = nullptr;
 
-static dawn_wire::WireServer* wireServer = nullptr;
-static dawn_wire::WireClient* wireClient = nullptr;
-static LolCommandBuffer* c2sBuf = nullptr;
+//static dawn_wire::WireClient* wireClient = nullptr;
 static LolCommandBuffer* s2cBuf = nullptr;
+//static LolCommandBuffer* c2sBuf = nullptr;
 
 wgpu::Device         device;
 wgpu::Queue          queue;
@@ -244,10 +271,10 @@ static void PrintGLFWError(int code, const char* message) {
 }
 
 
-void flushWireBuffers() {
-  bool s2cSuccess = s2cBuf->Flush();
-  ASSERT(s2cSuccess);
-}
+// void flushWireBuffers() {
+//   bool s2cSuccess = s2cBuf->Flush();
+//   ASSERT(s2cSuccess);
+// }
 
 
 void configureSwapchain(int width, int height);
@@ -281,7 +308,7 @@ void onKeyPress(GLFWwindow* window, int key, int scancode, int action, int mods)
 //   height The new height, in pixels, of the framebuffer.
 void onWindowFramebufferResize(GLFWwindow* window, int width, int height) {
   //printf("onWindowFramebufferResize width=%d, height=%d\n", width, height);
-  flushWireBuffers();
+  //flushWireBuffers();
   configureSwapchain(width, height);
 }
 
@@ -320,6 +347,90 @@ void createOSWindow() {
 }
 
 
+const char* backendTypeName(wgpu::BackendType t) {
+  switch (t) {
+    case wgpu::BackendType::Null:     return "Null";
+    case wgpu::BackendType::D3D11:    return "D3D11";
+    case wgpu::BackendType::D3D12:    return "D3D12";
+    case wgpu::BackendType::Metal:    return "Metal";
+    case wgpu::BackendType::Vulkan:   return "Vulkan";
+    case wgpu::BackendType::OpenGL:   return "OpenGL";
+    case wgpu::BackendType::OpenGLES: return "OpenGLES";
+  }
+  return "?";
+}
+
+const char* adapterTypeName(wgpu::AdapterType t) {
+  switch (t) {
+    case wgpu::AdapterType::DiscreteGPU:   return "DiscreteGPU";
+    case wgpu::AdapterType::IntegratedGPU: return "IntegratedGPU";
+    case wgpu::AdapterType::CPU:           return "CPU";
+    case wgpu::AdapterType::Unknown:       return "Unknown";
+  }
+  return "?";
+}
+
+// dumpLogAvailableAdapters prints a list of all adapters and their properties
+void dumpLogAvailableAdapters(dawn_native::Instance* instance) {
+  for (auto&& a : instance->GetAdapters()) {
+    wgpu::AdapterProperties p;
+    a.GetProperties(&p);
+    dlog("adapter %s\n"
+      "  description: %s\n"
+      "  deviceID:    %u\n"
+      "  vendorID:    0x%x\n"
+      "  backendType: BackendType::%s\n"
+      "  adapterType: AdapterType::%s\n"
+      ,
+      p.name, p.driverDescription,
+      p.deviceID, p.vendorID,
+      backendTypeName(p.backendType),
+      adapterTypeName(p.adapterType));
+  }
+}
+
+
+dawn_native::Adapter backendAdapter;
+std::vector<std::pair<uint32_t,uint32_t>> known_devices; // pair of <devId,devGen>
+
+
+WGPUDevice allocateClientDevice() {
+  // See:
+  //   https://source.chromium.org/chromium/chromium/src/+/master:gpu/command_buffer/service/webgpu_decoder_impl.cc;drc=8ca5d3a5f1d3e18b363549c0edd4c2494cfb70ea;l=519?q=webgpu_deco
+  //   https://source.chromium.org/chromium/chromium/src/+/master:gpu/command_buffer/service/webgpu_decoder_impl.cc;l=843?q=webgpu_deco
+  //
+  uint32_t devId = 1; // values from calling WireClient.ReserveDevice()
+  uint32_t devGen = 0;
+
+  dawn_native::DeviceDescriptor devdescr;
+  // devdescr.requiredExtensions.push_back("texture_compression_bc");
+  // devdescr.requiredExtensions.push_back("shader_float16");
+  // devdescr.requiredExtensions.push_back("pipeline_statistics_query");
+  // devdescr.requiredExtensions.push_back("timestamp_query");
+  // devdescr.requiredExtensions.push_back("depth_clamping");
+  assert(bool(backendAdapter) /* == backendAdapter.mImpl!=nullptr */);
+  WGPUDevice device = backendAdapter.CreateDevice(&devdescr);
+  if (!device)
+    return nullptr;
+
+  assert(wireServer != nullptr);
+  if (!wireServer->InjectDevice(device, devId, devGen)) {
+    wgpuDeviceRelease(device);
+    return nullptr;
+  }
+
+  // Device injection takes a ref. The wire now owns the device so release it.
+  dawn_native::GetProcs().deviceRelease(device);
+
+  // Save the id and generation of the device. Now, we can query the server for
+  // this pair to discover if this device has been destroyed. The list will be
+  // checked in PerformPollingWork to tick all the live devices and remove all
+  // the dead ones.
+  known_devices.emplace_back(devId, devGen);
+  return device;
+}
+
+
 wgpu::Device createDawnDevice() {
   if (window == nullptr)
     return wgpu::Device();
@@ -327,50 +438,55 @@ wgpu::Device createDawnDevice() {
   instance = std::make_unique<dawn_native::Instance>();
   utils::DiscoverAdapter(instance.get(), window, backendType);
 
+  dumpLogAvailableAdapters(instance.get());
+
+
   // Get an adapter for the backend to use, and create the device.
-  dawn_native::Adapter backendAdapter;
+  //dawn_native::Adapter backendAdapter;
   {
     std::vector<dawn_native::Adapter> adapters = instance->GetAdapters();
     auto adapterIt = std::find_if(adapters.begin(), adapters.end(),
       [](const dawn_native::Adapter adapter) -> bool {
         wgpu::AdapterProperties properties;
         adapter.GetProperties(&properties);
-        return properties.backendType == backendType;
+        if (properties.backendType == backendType) {
+          dlog("using adapter %s", properties.name);
+          return true;
+        }
+        return false;
       });
     ASSERT(adapterIt != adapters.end());
-    backendAdapter = *adapterIt;
+    backendAdapter = *adapterIt; // global var
   }
 
-  WGPUDevice backendDevice = backendAdapter.CreateDevice();
   DawnProcTable backendProcs = dawn_native::GetProcs();
 
-  binding = utils::CreateBinding(backendType, window, backendDevice);
-  if (binding == nullptr)
-    return wgpu::Device();
-
-  c2sBuf = new LolCommandBuffer("c2s");
+  // wire server
   s2cBuf = new LolCommandBuffer("s2c");
-
   dawn_wire::WireServerDescriptor serverDesc = {};
   serverDesc.procs = &backendProcs;
   serverDesc.serializer = s2cBuf;
   wireServer = new dawn_wire::WireServer(serverDesc);
-  c2sBuf->SetHandler(wireServer);
 
-  dawn_wire::WireClientDescriptor clientDesc = {};
-  clientDesc.serializer = c2sBuf;
-  wireClient = new dawn_wire::WireClient(clientDesc);
-  s2cBuf->SetHandler(wireClient);
+  // allocate a device for a client
+  WGPUDevice backendDevice = allocateClientDevice();
+  if (!backendDevice) {
+    dlog("allocateClientDevice FAILED");
+    return wgpu::Device();
+  }
+  dlog("allocateClientDevice OK");
 
-  DawnProcTable procs = dawn_wire::client::GetProcs();
+  // hook up error reporting
+  backendProcs.deviceSetUncapturedErrorCallback(backendDevice, PrintDeviceError, nullptr);
 
-  dawn_wire::ReservedDevice devReservation = wireClient->ReserveDevice();
-  wireServer->InjectDevice(backendDevice, devReservation.id, devReservation.generation);
-  WGPUDevice cDevice = devReservation.device;
+  // setup utils::BackendBinding
+  binding = utils::CreateBinding(backendType, window, backendDevice);
+  if (binding == nullptr)
+    return wgpu::Device();
 
-  dawnProcSetProcs(&procs);
-  procs.deviceSetUncapturedErrorCallback(cDevice, PrintDeviceError, nullptr);
-  return wgpu::Device::Acquire(cDevice);
+  dawnProcSetProcs(&backendProcs);
+
+  return wgpu::Device::Acquire(backendDevice);
 }
 
 
@@ -457,6 +573,7 @@ void init_dawn() {
   pipeline = device.CreateRenderPipeline2(&descriptor);
 }
 
+// render_frame is for rendering locally, for debugging
 void render_frame() {
   static uint16_t fc = 0; // frame counter
   fc++;
@@ -493,101 +610,8 @@ void render_frame() {
   queue.Submit(1, &commands);
   swapchain.Present();
 
-  if (!c2sBuf->Flush())
-    dlog("c2sBuf->Flush() failed");
-}
-
-
-
-// Conn is a connection to a client
-struct Conn {
-  uint32_t id;
-  RunLoop* rl;
-  ev_io    io;
-  bool     shutdown = false; // true if shutting down
-
-  struct {
-    char*  p[COMMAND_BUFFER_SIZE];
-    size_t len = 0;
-  } wbuf;
-
-  int fd() { return io.fd; }
-
-  bool write(const void* ptr, size_t len) {
-    if (len > 0) {
-      if (shutdown || len > COMMAND_BUFFER_SIZE - wbuf.len)
-        return false;
-      memcpy(&wbuf.p[wbuf.len], ptr, len);
-      wbuf.len += len;
-      dlog("wrote %zu bytes to client connection", len);
-      if ((io.events & EV_WRITE) == 0)
-        ev_io_modify(&io, io.events | EV_WRITE);
-    }
-    return true;
-  }
-
-  void close() {
-    if (rl != nullptr) {
-      ev_io_stop(rl, &io);
-      rl = nullptr;
-    }
-    if (io.fd != -1) {
-      ::close(io.fd);
-      io.fd = -1;
-    }
-  }
-};
-
-const char* sockfile = "server.sock";
-Conn* conn0 = nullptr;
-
-// onConnIO is called when a client connection has available I/O
-static void onConnIO(RunLoop* rl, ev_io* w, int revents) {
-  Conn* conn = (Conn*)w->data;
-  // dlog("onConnIO %s %s",
-  //   revents & EV_READ ? "EV_READ" : "",
-  //   revents & EV_WRITE ? "EV_WRITE" : "");
-
-  int fd = conn->fd();
-
-  if (revents & EV_READ) {
-    char rbuf[COMMAND_BUFFER_SIZE];
-    ssize_t n = ::read(fd, rbuf, sizeof(rbuf));
-    //dlog("read %zd bytes", n);
-    if (n == 0) {
-      dlog("connection #%u gone", conn->id);
-      conn->close();
-      if (conn == conn0)
-        conn0 = nullptr;
-      delete conn;
-      return;
-    }
-    // handle incoming data from conn
-    if (wireServer->HandleCommands(rbuf, (size_t)n) == nullptr)
-      dlog("wireServer->HandleCommands FAILED");
-  }
-
-  if (revents & EV_WRITE) {
-    auto& b = conn->wbuf;
-    if (b.len != 0) {
-      ssize_t z = ::write(fd, &b.p[b.len], b.len);
-      dlog("onConnIO write(%zu) => %zd", b.len, z);
-      if (z < b.len) {
-        // shift remaining to 0
-        size_t len2 = b.len - size_t(z);
-        memcpy(b.p, &b.p[b.len], len2);
-        b.len = len2;
-      } else {
-        b.len = 0;
-      }
-    }
-    if (b.len == 0) {
-      // nothing to write; stop requesting EV_WRITE
-      ev_io_stop(rl, w);
-      ev_io_modify(w, w->events & ~EV_WRITE);
-      ev_io_start(rl, w);
-    }
-  }
+  // if (!c2sBuf->Flush())
+  //   dlog("c2sBuf->Flush() failed");
 }
 
 // onServerIO is called when a new connection is awaiting accept
@@ -602,31 +626,30 @@ static void onServerIO(RunLoop* rl, ev_io* w, int revents) {
   FDSetNonBlock(fd);
 
   if (conn0 != nullptr) {
-    dlog("ignoring second client");
-    close(fd);
-    return;
+    dlog("second client connected; closing older client (last in wins)");
+    conn0->close();
   }
 
-  Conn* conn = new Conn();
-  conn0 = conn;
   static uint32_t connIdGen = 0;
-  conn->id = connIdGen++;
-  conn->rl = rl;
-  conn->io.data = (void*)conn;
-  dlog("accepted new connection #%u [fd %d]", conn->id, fd);
-  //s2cBuf->w = fd;
-  ev_io_init(&conn->io, onConnIO, fd, EV_READ);
-  ev_io_start(rl, &conn->io);
-
-  // send welcome message
-  conn->write("OHAI\n", 5);
+  conn0 = new Conn(connIdGen++);
+  dlog("accepted new connection #%u [fd %d]", conn0->id, fd);
+  conn0->proto.start(rl, fd);
 }
 
-static void onPollTimeout(RunLoop* rl, ev_timer* w, int revents) {
+void onPollTimeout(RunLoop* rl, ev_timer* w, int revents) {
   // dlog("poll timeout");
   ev_timer_again(rl, w);
   // render_frame(); // render locally
   // swapchain.Present();
+}
+
+void onFrameTimer(RunLoop* rl, ev_timer* w, int revents) {
+  if (conn0) {
+    swapchain.Present();
+    wgpu::TextureView backbufferView = swapchain.GetCurrentTextureView();
+    conn0->proto.writeFrame();
+  }
+  ev_timer_again(rl, w);
 }
 
 int main(int argc, const char* argv[]) {
@@ -649,6 +672,13 @@ int main(int argc, const char* argv[]) {
   ev_io_init(&server_fd_watcher, onServerIO, fd, EV_READ);
   ev_io_start(rl, &server_fd_watcher);
 
+  // use a timer to drive client rendering
+  ev_timer frame_timer;
+  ev_init(&frame_timer, onFrameTimer);
+  frame_timer.repeat = 1.0;
+  ev_timer_again(rl, &frame_timer);
+  ev_unref(rl); // don't allow timer to keep runloop alive alone
+
   // use a timer to drive the runloop so we can call glfwPollEvents often enough
   const uint32_t FPS = 60;
   ev_timer timer;
@@ -657,9 +687,9 @@ int main(int argc, const char* argv[]) {
   ev_timer_again(rl, &timer);
   ev_unref(rl); // don't allow timer to keep runloop alive alone
 
-  // for some reason we need to do this once for things to work... why?
-  if (!c2sBuf->Flush())
-    dlog("c2sBuf->Flush failed");
+  //// for some reason we need to do this once for things to work... why?
+  //if (!c2sBuf->Flush())
+  //  dlog("c2sBuf->Flush failed");
 
   // // stats
   // double framestats[FPS] = {0};

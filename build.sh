@@ -62,7 +62,15 @@ _pidfile_kill() {
   fi
 }
 
-RUN_PIDFILE=
+RUN_PIDFILE="$PWD/run-${$}.pid"
+BUILD_LOCKFILE=$PWD/.build.lock
+
+__atexit() {
+  set +e
+  _pidfile_kill "$RUN_PIDFILE"
+  rm -rf "$BUILD_LOCKFILE"
+}
+trap __atexit EXIT
 
 _onsigint() {
   echo
@@ -82,8 +90,27 @@ _run_after_build() {
   set -e
 }
 
-if ! $OPT_WATCH; then
+_build() {
+  local printed_msg=false
+  while true; do
+    if { set -C; 2>/dev/null >"$BUILD_LOCKFILE"; }; then
+      break
+    else
+      if ! $printed_msg; then
+        printed_msg=true
+        echo "waiting for build lock..."
+      fi
+      sleep 0.5
+    fi
+  done
   ninja "$@"
+  local result=$?
+  rm -rf "$BUILD_LOCKFILE"
+  return $result
+}
+
+if ! $OPT_WATCH; then
+  _build "$@"
   [ -z "$OPT_RUN" ] || exec $OPT_RUN
   exit 0
 fi
@@ -98,16 +125,16 @@ fi
 
 FSWATCH_ARGS=()
 if [[ "$@" == *"client"* && "$@" != *"server"* ]]; then
-  FSWATCH_ARGS=( "$USER_PWD"/client*.cc )
+  FSWATCH_ARGS=( "$USER_PWD"/client*.cc "$USER_PWD"/protocol*.* )
 elif [[ "$@" == *"server"* && "$@" != *"client"* ]]; then
-  FSWATCH_ARGS=( "$USER_PWD"/server*.cc )
+  FSWATCH_ARGS=( "$USER_PWD"/server*.cc "$USER_PWD"/protocol*.* )
 else
   FSWATCH_ARGS=( --exclude='.*' --include='\.(c|cc|cpp|h|s|S)$' "$USER_PWD" )
 fi
 
 while true; do
   printf "\x1bc"  # clear screen ("scroll to top" style)
-  if ninja "$@" && [ -n "$OPT_RUN" ]; then
+  if _build "$@" && [ -n "$OPT_RUN" ]; then
     _run_after_build
   fi
   echo "watching files for changes ..."

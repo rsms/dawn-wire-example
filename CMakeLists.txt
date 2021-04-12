@@ -27,22 +27,6 @@ target_link_libraries(server
   glfw
   "ev"
 )
-
-add_executable(server2
-  "server2.cc"
-)
-target_link_libraries(server2
-  dawn_internal_config
-  dawncpp
-  dawn_proc
-  dawn_common
-  dawn_native
-  dawn_wire
-  dawn_utils
-  glfw
-  "ev"
-)
-
 add_executable(client
   "client.cc"
 )
@@ -56,21 +40,55 @@ target_link_libraries(client
   "ev"
 )
 
+
+add_executable(server2
+  "server2.cc"
+  "protocol.cc"
+)
+target_link_libraries(server2
+  dawn_internal_config
+  dawncpp
+  dawn_proc
+  dawn_common
+  dawn_native
+  dawn_wire
+  dawn_utils
+  glfw
+  "ev"
+)
+add_executable(client2
+  "client2.cc"
+  "protocol.cc"
+)
+target_link_libraries(client2
+  dawn_internal_config
+  dawncpp
+  dawn_proc
+  dawn_common
+  dawn_wire
+  dawn_utils
+  "ev"
+)
+
 target_link_directories(server  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/libev/lib )
 target_link_directories(server2 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/libev/lib )
 target_link_directories(client  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/libev/lib )
+target_link_directories(client2 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/libev/lib )
 
 target_include_directories(server  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/libev/include )
 target_include_directories(server2 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/libev/include )
 target_include_directories(client  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/libev/include )
+target_include_directories(client2 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/libev/include )
 
 if (${CMAKE_BUILD_TYPE} MATCHES "Debug")
   target_compile_definitions(server  PRIVATE DEBUG=1)
   target_compile_definitions(server2 PRIVATE DEBUG=1)
   target_compile_definitions(client  PRIVATE DEBUG=1)
+  target_compile_definitions(client2 PRIVATE DEBUG=1)
 
   target_compile_options(server  PRIVATE -g -O0 "-ffile-prefix-map=../../=")
   target_compile_options(server2 PRIVATE -g -O0 "-ffile-prefix-map=../../=")
   target_compile_options(client  PRIVATE -g -O0 "-ffile-prefix-map=../../=")
+  target_compile_options(client2 PRIVATE -g -O0 "-ffile-prefix-map=../../=")
 endif()
 

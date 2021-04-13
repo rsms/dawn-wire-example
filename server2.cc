@@ -14,20 +14,11 @@
 
 #include "protocol.hh"
 
-#include "dawn/examples/SampleUtils.h"
-
-#include "utils/BackendBinding.h"
 #include "utils/GLFWUtils.h"
-
-#include "utils/SystemUtils.h"
-#include "utils/WGPUHelpers.h"
 #include "GLFW/glfw3.h"
 
 #include <dawn/webgpu_cpp.h>
-
 #include <dawn/dawn_proc.h>
-#include <dawn/dawn_wsi.h>
-#include <dawn_wire/WireClient.h>
 #include <dawn_wire/WireServer.h>
 #include <dawn_native/DawnNative.h>
 
@@ -138,24 +129,10 @@ int connectUNIXSocket(const char* filename) {
 }
 
 
-// backendType
-// Default to D3D12, Metal, Vulkan, OpenGL in that order as D3D12 and Metal are the preferred on
-// their respective platforms, and Vulkan is preferred to OpenGL
-#if defined(DAWN_ENABLE_BACKEND_D3D12)
-static wgpu::BackendType backendType = wgpu::BackendType::D3D12;
-#elif defined(DAWN_ENABLE_BACKEND_METAL)
-static wgpu::BackendType backendType = wgpu::BackendType::Metal;
-#elif defined(DAWN_ENABLE_BACKEND_VULKAN)
-static wgpu::BackendType backendType = wgpu::BackendType::Vulkan;
-#elif defined(DAWN_ENABLE_BACKEND_OPENGL)
-static wgpu::BackendType backendType = wgpu::BackendType::OpenGL;
-#else
-#  error
-#endif
-
-
+#define COMMAND_BUFFER_SIZE 4096*32
+const char* sockfile = "server.sock";
 static dawn_wire::WireServer* wireServer = nullptr;
-
+static dawn_wire::CommandSerializer* s2cBuf = nullptr;
 
 // Conn is a connection to a client
 struct Conn {
@@ -170,6 +147,7 @@ struct Conn {
       assert(wireServer != nullptr);
       if (wireServer->HandleCommands(data, len) == nullptr)
         dlog("wireServer->HandleCommands FAILED");
+      s2cBuf->Flush();
     };
   }
 
@@ -180,12 +158,7 @@ struct Conn {
   }
 };
 
-
-#define COMMAND_BUFFER_SIZE 4096*32
-
-const char* sockfile = "server.sock";
 Conn* conn0 = nullptr;
-
 
 class LolCommandBuffer : public dawn_wire::CommandSerializer {
   //dawn_wire::CommandHandler* mHandler = nullptr;
@@ -227,23 +200,20 @@ public:
   }
 };
 
-static std::unique_ptr<dawn_native::Instance> instance;
-static utils::BackendBinding*                 binding = nullptr;
-static GLFWwindow*                            window = nullptr;
-
-//static dawn_wire::WireClient* wireClient = nullptr;
-static LolCommandBuffer* s2cBuf = nullptr;
-//static LolCommandBuffer* c2sBuf = nullptr;
-
-wgpu::Device         device;
-wgpu::Queue          queue;
-wgpu::SwapChain      swapchain;
-wgpu::RenderPipeline pipeline;
-// wgpu::TextureView    depthStencilView;
-// wgpu::BindGroup      bindGroup;
-
-bool animate = false;
-
+// backendType
+// Default to D3D12, Metal, Vulkan, OpenGL in that order as D3D12 and Metal are the preferred on
+// their respective platforms, and Vulkan is preferred to OpenGL
+#if defined(DAWN_ENABLE_BACKEND_D3D12)
+static wgpu::BackendType backendType = wgpu::BackendType::D3D12;
+#elif defined(DAWN_ENABLE_BACKEND_METAL)
+static wgpu::BackendType backendType = wgpu::BackendType::Metal;
+#elif defined(DAWN_ENABLE_BACKEND_VULKAN)
+static wgpu::BackendType backendType = wgpu::BackendType::Vulkan;
+#elif defined(DAWN_ENABLE_BACKEND_OPENGL)
+static wgpu::BackendType backendType = wgpu::BackendType::OpenGL;
+#else
+#  error
+#endif
 
 static void PrintDeviceError(WGPUErrorType errorType, const char* message, void*) {
   const char* errorTypeName = "";
@@ -261,93 +231,15 @@ static void PrintDeviceError(WGPUErrorType errorType, const char* message, void*
       errorTypeName = "Device lost";
       break;
     default:
-      UNREACHABLE();
+      assert(false);
       return;
   }
   std::cerr << "device error: " << errorTypeName << " error: " << message << std::endl;
 }
 
-
 static void PrintGLFWError(int code, const char* message) {
   std::cerr << "GLFW error: " << code << " - " << message << std::endl;
 }
-
-
-// void flushWireBuffers() {
-//   bool s2cSuccess = s2cBuf->Flush();
-//   ASSERT(s2cSuccess);
-// }
-
-
-void configureSwapchain(int width, int height);
-
-
-// onKeyPress is called when keyboard keys are pressed.
-//   window   The window that received the event.
-//   key      The keyboard key that was pressed or released. (GLFW_KEY_*)
-//   scancode The system-specific scancode of the key.
-//   action   One of: GLFW_PRESS, GLFW_RELEASE, GLFW_REPEAT
-//   mods     Bit field describing which modifier keys were held down. (GLFW_MOD_*)
-//
-void onKeyPress(GLFWwindow* window, int key, int scancode, int action, int mods) {
-  if (action != GLFW_PRESS)
-    return;
-  printf("key press #%d %s\n", key, glfwGetKeyName(key, scancode));
-
-  switch (key) {
-  case GLFW_KEY_A:
-    animate = !animate;
-    break;
-
-  default:
-    break;
-  }
-}
-
-// onWindowFramebufferResize is called when a window's framebuffer has changed size
-//   window The window which framebuffer was resized.
-//   width  The new width, in pixels, of the framebuffer.
-//   height The new height, in pixels, of the framebuffer.
-void onWindowFramebufferResize(GLFWwindow* window, int width, int height) {
-  //printf("onWindowFramebufferResize width=%d, height=%d\n", width, height);
-  //flushWireBuffers();
-  configureSwapchain(width, height);
-}
-
-// onWindowResize is called when a window has been resized
-//   window The window that was resized.
-//   width  The new width, in screen coordinates, of the window.
-//   height The new height, in screen coordinates, of the window.
-// Note: onWindowResize is called after any call to onWindowFramebufferResize
-void onWindowResize(GLFWwindow* window, int width, int height) {
-  //printf("onWindowResize width=%d, height=%d\n", width, height);
-  // redraw as onWindowFramebufferResize might have replaced the swapchain
-  // render_frame();
-}
-
-void createOSWindow() {
-  assert(window == nullptr);
-
-  glfwSetErrorCallback(PrintGLFWError);
-  if (!glfwInit())
-    return;
-
-  // Create the test window and discover adapters using it (esp. for OpenGL)
-  utils::SetupGLFWWindowHintsForBackend(backendType);
-  glfwWindowHint(GLFW_COCOA_RETINA_FRAMEBUFFER, GLFW_FALSE);
-  window = glfwCreateWindow(640, 480, "hello-wire", /*monitor*/nullptr, nullptr);
-  if (!window)
-    return;
-
-  // [rsms] move window to bottom right corner of screen
-  // glfwSetWindowPos(window, 1920, 960);
-  glfwSetWindowPos(window, 2560, 960); // 2nd screen, bottom left corner
-
-  glfwSetKeyCallback(window, onKeyPress);
-  glfwSetFramebufferSizeCallback(window, onWindowFramebufferResize);
-  glfwSetWindowSizeCallback(window, onWindowResize);
-}
-
 
 const char* backendTypeName(wgpu::BackendType t) {
   switch (t) {
@@ -391,62 +283,35 @@ void dumpLogAvailableAdapters(dawn_native::Instance* instance) {
   }
 }
 
-
+DawnProcTable nativeProcs;
+static std::unique_ptr<dawn_native::Instance> instance;
 dawn_native::Adapter backendAdapter;
+wgpu::Device         device;
+wgpu::Surface        surface;
+wgpu::SwapChain      swapchain;
 
+static GLFWwindow* window = nullptr;
 
-WGPUDevice allocateClientDevice() {
-  // See:
-  //   https://source.chromium.org/chromium/chromium/src/+/master:gpu/command_buffer/service/webgpu_decoder_impl.cc;drc=8ca5d3a5f1d3e18b363549c0edd4c2494cfb70ea;l=519?q=webgpu_deco
-  //   https://source.chromium.org/chromium/chromium/src/+/master:gpu/command_buffer/service/webgpu_decoder_impl.cc;l=843?q=webgpu_deco
-  //
-  uint32_t reservationId = 1; // values from calling WireClient.ReserveDevice()
-  uint32_t reservationGen = 0;
+void createOSWindow() {
+  assert(window == nullptr);
 
-  dawn_native::DeviceDescriptor devdescr;
-  // devdescr.requiredExtensions.push_back("texture_compression_bc");
-  // devdescr.requiredExtensions.push_back("shader_float16");
-  // devdescr.requiredExtensions.push_back("pipeline_statistics_query");
-  // devdescr.requiredExtensions.push_back("timestamp_query");
-  // devdescr.requiredExtensions.push_back("depth_clamping");
-  assert(bool(backendAdapter) /* == backendAdapter.mImpl!=nullptr */);
-  WGPUDevice device = backendAdapter.CreateDevice(&devdescr);
-  if (!device)
-    return nullptr;
+  glfwSetErrorCallback(PrintGLFWError);
+  if (!glfwInit())
+    return;
 
-  assert(wireServer != nullptr);
-  // Re wireServer->InjectDevice:
-  //   the only code path in Server::InjectDevice that fails is when
-  //   Server::DeviceObjects().Allocate(id) fails which is defined in auto-generated
-  //   code at {out}/dawn/gen/src/dawn_wire/server/ServerBase_autogen.h
-  //   where DeviceObjects() is really just an accessor to KnownObjects<WGPUDevice> mKnownDevice
-  //   which in turn is defined in dawn/src/dawn_wire/server/ObjectStorage.h which
-  //   implementation fails if (id == 0 || id > mKnown.size()) or the device is already allocated.
-  if (!wireServer->InjectDevice(device, reservationId, reservationGen)) {
-    dlog("wireServer->InjectDevice FAILED");
-    wgpuDeviceRelease(device);
-    return nullptr;
-  }
-
-  // Device injection takes a ref. The wire now owns the device so release it.
-  dawn_native::GetProcs().deviceRelease(device);
-
-  return device;
+  // Setup the correct hints for GLFW for backends.
+  utils::SetupGLFWWindowHintsForBackend(backendType);
+  glfwWindowHint(GLFW_COCOA_RETINA_FRAMEBUFFER, GLFW_FALSE);
+  window = glfwCreateWindow(640, 480, "hello-wire", /*monitor*/nullptr, nullptr);
+  if (!window)
+    return;
 }
 
-
-const DawnProcTable* gProcs;
-
-
-wgpu::Device createDawnDevice() {
-  if (window == nullptr)
-    return wgpu::Device();
-
+void createDawnDevice() {
   instance = std::make_unique<dawn_native::Instance>();
-  utils::DiscoverAdapter(instance.get(), window, backendType);
+  instance->DiscoverDefaultAdapters();
 
   dumpLogAvailableAdapters(instance.get());
-
 
   // Get an adapter for the backend to use, and create the device.
   //dawn_native::Adapter backendAdapter;
@@ -462,164 +327,50 @@ wgpu::Device createDawnDevice() {
         }
         return false;
       });
-    ASSERT(adapterIt != adapters.end());
+    assert(adapterIt != adapters.end());
     backendAdapter = *adapterIt; // global var
   }
 
-  DawnProcTable backendProcs = dawn_native::GetProcs();
-  gProcs = &backendProcs; // global var
+  // Set up the native procs for the global proctable (so calling
+  // wgpu::Object::Foo calls into that proc) but also keep it around
+  // so we can give it to the wire server.
+  nativeProcs = dawn_native::GetProcs(); // global var
+  dawnProcSetProcs(&nativeProcs);
 
+  device = wgpu::Device::Acquire(backendAdapter.CreateDevice());// global var
+
+  // hook up error reporting
+  device.SetUncapturedErrorCallback(PrintDeviceError, nullptr);
+}
+
+void createDawnSwapChain() {
+  surface = utils::CreateSurfaceForWindow(instance->Get(), window); // global var
+
+  wgpu::SwapChainDescriptor desc;
+  desc.usage = wgpu::TextureUsage::RenderAttachment;
+  desc.width = 640;
+  desc.height = 480;
+  desc.format = wgpu::TextureFormat::BGRA8Unorm;
+  desc.presentMode = wgpu::PresentMode::Mailbox;
+
+  swapchain = device.CreateSwapChain(surface, &desc); // global var
+}
+
+void initDawnWire() {
   // wire server
   s2cBuf = new LolCommandBuffer("s2c");
+
   dawn_wire::WireServerDescriptor serverDesc = {};
-  serverDesc.procs = &backendProcs;
+  serverDesc.procs = &nativeProcs;
   serverDesc.serializer = s2cBuf;
   wireServer = new dawn_wire::WireServer(serverDesc);
 
-  // allocate a device for a client
-  WGPUDevice backendDevice = allocateClientDevice();
-  if (!backendDevice) {
-    dlog("allocateClientDevice FAILED");
-    return wgpu::Device();
-  }
-  dlog("allocateClientDevice OK");
-
-  // hook up error reporting
-  backendProcs.deviceSetUncapturedErrorCallback(backendDevice, PrintDeviceError, nullptr);
-
-  // setup utils::BackendBinding
-  binding = utils::CreateBinding(backendType, window, backendDevice);
-  if (binding == nullptr)
-    return wgpu::Device();
-
-  dawnProcSetProcs(&backendProcs);
-
-  return wgpu::Device::Acquire(backendDevice);
-}
-
-
-wgpu::TextureFormat GetPreferredSwapChainTextureFormat2() {
-  return static_cast<wgpu::TextureFormat>(binding->GetPreferredSwapChainTextureFormat());
-}
-
-
-void configureSwapchain(int width, int height) {
-  wgpu::SwapChainDescriptor descriptor;
-  descriptor.implementation = binding->GetSwapChainImplementation();
-  swapchain = device.CreateSwapChain(nullptr, &descriptor);
-  swapchain.Configure(
-    GetPreferredSwapChainTextureFormat2(),
-    wgpu::TextureUsage::RenderAttachment,
-    width,
-    height);
-}
-
-
-void init_dawn() {
-  device = createDawnDevice();
-  queue = device.GetQueue();
-
-  int width = 100;
-  int height = 100;
-  glfwGetFramebufferSize(window, &width, &height);
-  configureSwapchain(width, height);
-
-  const char* vs =
-    "[[builtin(vertex_index)]] var<in> VertexIndex : u32;\n"
-    "[[builtin(position)]] var<out> Position : vec4<f32>;\n"
-    "const pos : array<vec2<f32>, 3> = array<vec2<f32>, 3>(\n"
-    "    vec2<f32>( 0.0,  0.5),\n"
-    "    vec2<f32>(-0.5, -0.5),\n"
-    "    vec2<f32>( 0.5, -0.5)\n"
-    ");\n"
-    "[[stage(vertex)]] fn main() -> void {\n"
-    "    Position = vec4<f32>(pos[VertexIndex], 0.0, 1.0);\n"
-    "    return;\n"
-    "}\n";
-  wgpu::ShaderModule vsModule = utils::CreateShaderModule(device, vs);
-
-  const char* fs =
-    "[[location(0)]] var<out> fragColor : vec4<f32>;\n"
-    "[[stage(fragment)]] fn main() -> void {\n"
-    "    fragColor = vec4<f32>(1.0, 0.0, 0.7, 1.0);\n"
-    "    return;\n"
-    "}\n";
-  wgpu::ShaderModule fsModule = utils::CreateShaderModule(device, fs);
-
-  wgpu::RenderPipelineDescriptor2 descriptor;
-
-  // Fragment state
-  wgpu::BlendState blend;
-  blend.color.dstFactor = wgpu::BlendFactor::One;
-  blend.alpha.dstFactor = wgpu::BlendFactor::One;
-
-  wgpu::ColorTargetState colorTarget;
-  colorTarget.format = GetPreferredSwapChainTextureFormat2();
-  colorTarget.blend = &blend;
-
-  wgpu::FragmentState fragment;
-  fragment.module = fsModule;
-  fragment.entryPoint = "main";
-  fragment.targetCount = 1;
-  fragment.targets = &colorTarget;
-  descriptor.fragment = &fragment;
-
-  descriptor.vertex.module = vsModule;
-  descriptor.vertex.entryPoint = "main";
-  descriptor.vertex.bufferCount = 0;
-  descriptor.vertex.buffers = nullptr;
-
-  descriptor.multisample.count = 1;
-  descriptor.multisample.mask = 0xFFFFFFFF;
-  descriptor.multisample.alphaToCoverageEnabled = false;
-
-  descriptor.primitive.frontFace = wgpu::FrontFace::CCW;
-  descriptor.primitive.cullMode = wgpu::CullMode::None;
-  descriptor.primitive.topology = wgpu::PrimitiveTopology::TriangleList;
-  descriptor.primitive.stripIndexFormat = wgpu::IndexFormat::Undefined;
-
-  pipeline = device.CreateRenderPipeline2(&descriptor);
-}
-
-// render_frame is for rendering locally, for debugging
-void render_frame() {
-  static uint16_t fc = 0; // frame counter
-  fc++;
-  float RED   = 0.4;
-  float GREEN = 0.4;
-  float BLUE  = 0.4;
-  if (animate) {
-    RED   = std::abs(sinf(float(fc) / 100));
-    GREEN = std::abs(sinf(float(fc) / 90));
-    BLUE  = std::abs(cosf(float(fc) / 80));
-  }
-
-  wgpu::TextureView backbufferView = swapchain.GetCurrentTextureView();
-  wgpu::RenderPassDescriptor renderpassInfo;
-  wgpu::RenderPassColorAttachmentDescriptor colorAttachment;
-  colorAttachment.attachment = backbufferView;
-  colorAttachment.resolveTarget = nullptr;
-  colorAttachment.clearColor = {RED, GREEN, BLUE, 0.0f};
-  colorAttachment.loadOp = wgpu::LoadOp::Clear;
-  colorAttachment.storeOp = wgpu::StoreOp::Store;
-  renderpassInfo.colorAttachmentCount = 1;
-  renderpassInfo.colorAttachments = &colorAttachment;
-  renderpassInfo.depthStencilAttachment = nullptr;
-
-  wgpu::CommandBuffer commands;
-  wgpu::CommandEncoder encoder = device.CreateCommandEncoder(nullptr);
-  wgpu::RenderPassEncoder pass = encoder.BeginRenderPass(&renderpassInfo);
-  pass.SetPipeline(pipeline);
-  pass.Draw(3, 1, 0, 0);
-  pass.EndPass();
-  pass.Release();
-  commands = encoder.Finish(nullptr);
-
-  queue.Submit(1, &commands);
-  swapchain.Present();
-
-  // if (!c2sBuf->Flush())
-  //   dlog("c2sBuf->Flush() failed");
+  // Hardcoded generation and IDs need to match what's produced by the client
+  // or be sent over through the wire.
+  wireServer->InjectDevice(device.Get(), 1, 0);
+  wireServer->InjectSwapChain(swapchain.Get(), 1, 0, 1, 0);
+  // kangz: Maybe we should inject the surface instead and just let the client
+  // create its swapchain??
 }
 
 // onServerIO is called when a new connection is awaiting accept
@@ -647,58 +398,10 @@ static void onServerIO(RunLoop* rl, ev_io* w, int revents) {
 void onPollTimeout(RunLoop* rl, ev_timer* w, int revents) {
   // dlog("poll timeout");
   ev_timer_again(rl, w);
-  // render_frame(); // render locally
-  // swapchain.Present();
 }
-
-struct FakeTexture {
-  // copied from dawn/out/Release/gen/src/dawn/mock_webgpu.cpp
-  // as used by dawn/src/tests/unittests/wire/WireInjectTextureTests.cpp
-  const DawnProcTable* procs = gProcs;
-  WGPUBufferMapCallback mBufferMapAsyncCallback = nullptr;
-  WGPUCreateComputePipelineAsyncCallback mDeviceCreateComputePipelineAsyncCallback = nullptr;
-  WGPUCreateRenderPipelineAsyncCallback mDeviceCreateRenderPipelineAsyncCallback = nullptr;
-  WGPUErrorCallback mDevicePopErrorScopeCallback = nullptr;
-  WGPUDeviceLostCallback mDeviceSetDeviceLostCallbackCallback = nullptr;
-  WGPUErrorCallback mDeviceSetUncapturedErrorCallbackCallback = nullptr;
-  WGPUFenceOnCompletionCallback mFenceOnCompletionCallback = nullptr;
-  WGPUQueueWorkDoneCallback mQueueOnSubmittedWorkDoneCallback = nullptr;
-  WGPUCompilationInfoCallback mShaderModuleGetCompilationInfoCallback = nullptr;
-  void* userdata = 0;
-};
-
-static WGPUTexture GetNewTexture() {
-  return reinterpret_cast<WGPUTexture>(new FakeTexture);
-}
-
 
 void onFrameTimer(RunLoop* rl, ev_timer* w, int revents) {
   if (conn0) {
-    fprintf(stderr, "\n");
-    dlog("FRAME");
-    static WGPUTexture apiTexture = nullptr;
-
-    if (apiTexture == nullptr) {
-      apiTexture = GetNewTexture();
-
-      // expect client to call wireClient->ReserveTexture when it gets a FRAME message
-      uint32_t id = 1;
-      uint32_t generation = 0;
-      uint32_t deviceId = 1;         // should match reservationId in allocateClientDevice()
-      uint32_t deviceGeneration = 0; // should match servationGen in allocateClientDevice()
-      if (wireServer->InjectTexture(apiTexture, id, generation, deviceId, deviceGeneration)) {
-        dlog("wireServer->InjectTexture OK");
-      } else {
-        dlog("wireServer->InjectTexture FAILED");
-      }
-    } else {
-      swapchain.Present();
-      // delete reinterpret_cast<FakeTexture*>(apiTexture);
-    }
-
-    static wgpu::TextureView backbufferView;
-    backbufferView = swapchain.GetCurrentTextureView();
-
     // send FRAME message to client
     conn0->proto.writeFrame();
   }
@@ -714,8 +417,9 @@ int main(int argc, const char* argv[]) {
   }
 
   createOSWindow();
-
-  init_dawn();
+  createDawnDevice();
+  createDawnSwapChain();
+  initDawnWire();
 
   RunLoop* rl = EV_DEFAULT;
 

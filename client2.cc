@@ -14,21 +14,12 @@
 
 #include "protocol.hh"
 
-#include "dawn/examples/SampleUtils.h"
-
-#include "utils/BackendBinding.h"
-#include "utils/GLFWUtils.h"
-#include "utils/TerribleCommandBuffer.h"
-
-#include "utils/SystemUtils.h"
+#include "utils/ComboRenderPipelineDescriptor.h"
 #include "utils/WGPUHelpers.h"
 
 #include <dawn/webgpu.h>
-
 #include <dawn/dawn_proc.h>
-#include <dawn/dawn_wsi.h>
 #include <dawn_wire/WireClient.h>
-#include <dawn_wire/WireServer.h>
 
 #include <cmath>
 #include <iostream>
@@ -130,169 +121,66 @@ DawnClientServerProtocol proto;
 
 dawn_wire::WireClient* wireClient = nullptr;
 
-WGPUDevice         device;
-WGPUQueue          queue;
-WGPURenderPipeline pipeline;
-// WGPUSwapChain      swapchain;
-// WGPUTextureFormat  swapChainFormat;
+wgpu::Device         device;
+wgpu::SwapChain      swapchain;
+wgpu::RenderPipeline pipeline;
 
-
-static void PrintDeviceError(WGPUErrorType errorType, const char* message, void*) {
-  const char* errorTypeName = "";
-  switch (errorType) {
-    case WGPUErrorType_Validation:
-      errorTypeName = "Validation";
-      break;
-    case WGPUErrorType_OutOfMemory:
-      errorTypeName = "Out of memory";
-      break;
-    case WGPUErrorType_Unknown:
-      errorTypeName = "Unknown";
-      break;
-    case WGPUErrorType_DeviceLost:
-      errorTypeName = "Device lost";
-      break;
-    default:
-      UNREACHABLE();
-      return;
-  }
-  std::cerr << "device error: " << errorTypeName << " error: " << message << std::endl;
-}
-
-
-wgpu::Device createWebGPUDevice() {
-  DawnProcTable procs;
-
+void initDawnWire() {
   dawn_wire::WireClientDescriptor clientDesc = {};
   clientDesc.serializer = &proto;
-  wireClient = new dawn_wire::WireClient(clientDesc);
-  procs = dawn_wire::client::GetProcs();
+  wireClient = new dawn_wire::WireClient(clientDesc); // global var
+
+  DawnProcTable procs = dawn_wire::client::GetProcs();
+  dawnProcSetProcs(&procs);
 
   auto deviceReservation = wireClient->ReserveDevice();
-  WGPUDevice device = deviceReservation.device;
+  device = wgpu::Device::Acquire(deviceReservation.device); // global var
 
-  dawnProcSetProcs(&procs);
-  procs.deviceSetUncapturedErrorCallback(device, PrintDeviceError, nullptr);
-  return wgpu::Device::Acquire(device);
+  auto swapchainReservation = wireClient->ReserveSwapChain(device.Get());
+  swapchain = wgpu::SwapChain::Acquire(swapchainReservation.swapchain);
+
+  // These values are hardcoded in the server and must match. In the future we
+  // could send these as part of the initial handshake.
+  assert(deviceReservation.id == 1);
+  assert(deviceReservation.generation == 0);
+  assert(swapchainReservation.id == 1);
+  assert(swapchainReservation.generation == 0);
+  assert(swapchainReservation.deviceId == 1);
+  assert(swapchainReservation.deviceGeneration == 0);
 }
 
 
-void flushWireBuffers() {
-  // bool c2sSuccess = c2sBuf->Flush();
-  bool c2sSuccess = proto.Flush();
-  ASSERT(c2sSuccess);
-}
+void initDawnPipeline() {
+  utils::ComboRenderPipelineDescriptor2 desc;
+  desc.vertex.module = utils::CreateShaderModule(device, R"(
+    let pos = array<vec2<f32>, 3>(
+        vec2<f32>( 0.0,  0.5),
+        vec2<f32>(-0.5, -0.5),
+        vec2<f32>( 0.5, -0.5)
+    );
+    [[stage(vertex)]] fn main(
+        [[builtin(vertex_index)]] VertexIndex : u32;
+    ) -> [[builtin(position)]] vec4<f32> {
+        return vec4<f32>(pos[VertexIndex], 0.0, 1.0);
+    }
+  )");
+  desc.cFragment.module = utils::CreateShaderModule(device, R"(
+    [[stage(fragment)]] fn main() -> [[location(0)]] vec4<f32> {
+        return vec4<f32>(1.0, 0.0, 0.7, 1.0);
+    }
+  )");
+  desc.cTargets[0].format = wgpu::TextureFormat::BGRA8Unorm;
 
-
-// void configureSwapchain(int width, int height) {
-//   WGPUSwapChainDescriptor descriptor = {};
-//   // descriptor.implementation = binding->GetSwapChainImplementation();
-//   //descriptor.implementation = dawn_native::null::CreateNativeSwapChainImpl();
-//   descriptor.format = WGPUTextureFormat_RGBA8Unorm;
-//   descriptor.presentMode = WGPUPresentMode_Immediate;
-//   swapchain = wgpuDeviceCreateSwapChain(device, nullptr, &descriptor);
-
-//   // wgpu::TextureFormat textureFormat = static_cast<wgpu::TextureFormat>(
-//   //   binding->GetPreferredSwapChainTextureFormat())
-//   // swapChainFormat = static_cast<WGPUTextureFormat>(textureFormat);
-
-//   swapChainFormat = WGPUTextureFormat_RGBA8Unorm;
-//   wgpuSwapChainConfigure(swapchain, descriptor.format, WGPUTextureUsage_RenderAttachment,
-//     width, height);
-// }
-
-
-void init_dawn() {
-  queue = wgpuDeviceGetQueue(device);
-
-  //configureSwapchain(640, 480);
-
-  const char* vs =
-    "[[builtin(vertex_index)]] var<in> VertexIndex : u32;\n"
-    "[[builtin(position)]] var<out> Position : vec4<f32>;\n"
-    "const pos : array<vec2<f32>, 3> = array<vec2<f32>, 3>(\n"
-    "    vec2<f32>( 0.0,  0.5),\n"
-    "    vec2<f32>(-0.5, -0.5),\n"
-    "    vec2<f32>( 0.5, -0.5)\n"
-    ");\n"
-    "[[stage(vertex)]] fn main() -> void {\n"
-    "    Position = vec4<f32>(pos[VertexIndex], 0.0, 1.0);\n"
-    "    return;\n"
-    "}\n";
-  WGPUShaderModule vsModule = utils::CreateShaderModule(device, vs).Release();
-
-  const char* fs =
-    "[[location(0)]] var<out> fragColor : vec4<f32>;\n"
-    "[[stage(fragment)]] fn main() -> void {\n"
-    "    fragColor = vec4<f32>(1.0, 0.0, 0.7, 1.0);\n"
-    "    return;\n"
-    "}\n";
-  WGPUShaderModule fsModule = utils::CreateShaderModule(device, fs).Release();
-
-  {
-    WGPURenderPipelineDescriptor2 descriptor = {};
-
-    // Fragment state
-    WGPUBlendState blend = {};
-    blend.color.operation = WGPUBlendOperation_Add;
-    blend.color.srcFactor = WGPUBlendFactor_One;
-    blend.color.dstFactor = WGPUBlendFactor_One;
-    blend.alpha.operation = WGPUBlendOperation_Add;
-    blend.alpha.srcFactor = WGPUBlendFactor_One;
-    blend.alpha.dstFactor = WGPUBlendFactor_One;
-
-    WGPUColorTargetState colorTarget = {};
-    colorTarget.format = WGPUTextureFormat_RGBA8Unorm;
-    colorTarget.blend = &blend;
-    colorTarget.writeMask = WGPUColorWriteMask_All;
-
-    WGPUFragmentState fragment = {};
-    fragment.module = fsModule;
-    fragment.entryPoint = "main";
-    fragment.targetCount = 1;
-    fragment.targets = &colorTarget;
-    descriptor.fragment = &fragment;
-
-    // Other state
-    descriptor.layout = nullptr;
-    descriptor.depthStencil = nullptr;
-
-    descriptor.vertex.module = vsModule;
-    descriptor.vertex.entryPoint = "main";
-    descriptor.vertex.bufferCount = 0;
-    descriptor.vertex.buffers = nullptr;
-
-    descriptor.multisample.count = 1;
-    descriptor.multisample.mask = 0xFFFFFFFF;
-    descriptor.multisample.alphaToCoverageEnabled = false;
-
-    descriptor.primitive.frontFace = WGPUFrontFace_CCW;
-    descriptor.primitive.cullMode = WGPUCullMode_None;
-    descriptor.primitive.topology = WGPUPrimitiveTopology_TriangleList;
-    descriptor.primitive.stripIndexFormat = WGPUIndexFormat_Undefined;
-
-    pipeline = wgpuDeviceCreateRenderPipeline2(device, &descriptor);
-  }
-
-  wgpuShaderModuleRelease(vsModule);
-  wgpuShaderModuleRelease(fsModule);
+  pipeline = device.CreateRenderPipeline2(&desc); // global var
 }
 
 uint32_t fc = 0;
 bool animate = true;
 
-
 void render_frame() {
   fc++;
   fprintf(stderr, "\n");
   dlog("FRAME %u", fc);
-
-  // reserve a texture
-  static dawn_wire::ReservedTexture reservedTexture;
-  //wireClient->ReclaimTextureReservation(reservedTexture);
-  if (reservedTexture.texture == nullptr) {
-    reservedTexture = wireClient->ReserveTexture(device);
-  }
 
   float RED   = 0.4;
   float GREEN = 0.4;
@@ -303,46 +191,26 @@ void render_frame() {
     BLUE  = std::abs(cosf(float(fc) / 80));
   }
 
-  //WGPUTextureView backbufferView = wgpuSwapChainGetCurrentTextureView(swapchain);
-
-  // This cases a segfault in the server when it receives the command buffer:
-  // WGPUTextureViewDescriptor textDescr = {
-  //   .label = "a",
-  //   .format = WGPUTextureFormat_RGBA8Unorm,
-  //   .dimension = WGPUTextureViewDimension_2D,
-  //   .baseMipLevel = 1,
-  //   .mipLevelCount = 1,
-  //   .baseArrayLayer = 0,
-  //   .arrayLayerCount = 0,
-  //   .aspect = WGPUTextureAspect_All,
-  // };
-  // WGPUTextureView backbufferView = wgpuTextureCreateView(reservedTexture.texture, &textDescr);
-
-  WGPURenderPassColorAttachmentDescriptor colorAttachment = {};
-  //colorAttachment.attachment = backbufferView;
-  colorAttachment.resolveTarget = nullptr;
+  wgpu::RenderPassColorAttachmentDescriptor colorAttachment;
+  colorAttachment.attachment = swapchain.GetCurrentTextureView();
   colorAttachment.clearColor = {RED, GREEN, BLUE, 0.0f};
-  colorAttachment.loadOp = WGPULoadOp_Clear;
-  colorAttachment.storeOp = WGPUStoreOp_Store;
+  colorAttachment.loadOp = wgpu::LoadOp::Clear;
+  colorAttachment.storeOp = wgpu::StoreOp::Store;
 
-  WGPURenderPassDescriptor renderpassInfo = {};
-  renderpassInfo.colorAttachmentCount = 1;
-  renderpassInfo.colorAttachments = &colorAttachment;
-  renderpassInfo.depthStencilAttachment = nullptr;
+  wgpu::RenderPassDescriptor renderPassDesc;
+  renderPassDesc.colorAttachmentCount = 1;
+  renderPassDesc.colorAttachments = &colorAttachment;
 
-  WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(device, nullptr);
-  WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(encoder, &renderpassInfo);
-  wgpuRenderPassEncoderSetPipeline(pass, pipeline);
-  wgpuRenderPassEncoderDraw(pass, 3, 1, 0, 0);
-  wgpuRenderPassEncoderEndPass(pass);
-  wgpuRenderPassEncoderRelease(pass);
-  WGPUCommandBuffer commands = wgpuCommandEncoderFinish(encoder, nullptr);
-  wgpuCommandEncoderRelease(encoder);
+  wgpu::CommandEncoder encoder = device.CreateCommandEncoder();
+  wgpu::RenderPassEncoder pass = encoder.BeginRenderPass(&renderPassDesc);
+  pass.SetPipeline(pipeline);
+  pass.Draw(3);
+  pass.EndPass();
 
-  wgpuQueueSubmit(queue, 1, &commands);
-  wgpuCommandBufferRelease(commands);
-  // wgpuSwapChainPresent(swapchain);
-  // wgpuTextureViewRelease(backbufferView);
+  wgpu::CommandBuffer commands = encoder.Finish();
+  device.GetQueue().Submit(1, &commands);
+
+  swapchain.Present();
 
   // // tell server we are writing a new frame
   // int fd = c2sBuf->w;
@@ -351,8 +219,6 @@ void render_frame() {
   // if (!c2sBuf->Flush()) // blocks on write I/O
   //   dlog("c2sBuf->Flush() failed");
   proto.Flush();
-
-  //flushWireBuffers();
 }
 
 
@@ -375,8 +241,8 @@ void runloop_main(int fd) {
   RunLoop* rl = EV_DEFAULT;
   FDSetNonBlock(fd);
 
-  device = createWebGPUDevice().Release();
-  init_dawn();
+  initDawnWire();
+  initDawnPipeline();
 
   ::memset(&conn, 0, sizeof(conn));
   conn.fd = fd;

@@ -30,6 +30,8 @@
 #include <dawn_wire/WireServer.h>
 #include <dawn_native/DawnNative.h>
 
+#include <algorithm>
+#include <cassert>
 #include <iostream>
 
 #include <unistd.h> // pipe

@@ -30,6 +30,7 @@
 #include <dawn_wire/WireClient.h>
 #include <dawn_wire/WireServer.h>
 
+#include <cmath>
 #include <iostream>
 
 #include <unistd.h> // pipe
@@ -297,9 +298,9 @@ void render_frame() {
   float GREEN = 0.4;
   float BLUE  = 0.4;
   if (animate) {
-    RED   = abs(sinf(float(fc) / 100));
-    GREEN = abs(sinf(float(fc) / 90));
-    BLUE  = abs(cosf(float(fc) / 80));
+    RED   = std::abs(sinf(float(fc) / 100));
+    GREEN = std::abs(sinf(float(fc) / 90));
+    BLUE  = std::abs(cosf(float(fc) / 80));
   }
 
   //WGPUTextureView backbufferView = wgpuSwapChainGetCurrentTextureView(swapchain);

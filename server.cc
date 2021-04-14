@@ -96,20 +96,6 @@ int createUNIXSocketServer(const char* filename) {
   return fd;
 }
 
-int connectUNIXSocket(const char* filename) {
-  /*struct*/ sockaddr_un addr;
-  int fd = createUNIXSocket(filename, &addr);
-  if (fd > -1) {
-    if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) == -1) {
-      int e = errno;
-      close(fd);
-      errno = e;
-      fd = -1;
-    }
-  }
-  return fd;
-}
-
 
 const char* sockfile = "server.sock";
 static GLFWwindow* window = nullptr;

@@ -83,25 +83,6 @@ int createUNIXSocket(const char* filename, sockaddr_un* addr) {
   return socket(AF_UNIX, SOCK_STREAM, 0);
 }
 
-int createUNIXSocketServer(const char* filename) {
-  /*struct*/ sockaddr_un addr;
-  int fd = createUNIXSocket(filename, &addr);
-  if (fd > -1) {
-    unlink(filename);
-    int acceptQueueSize = 5;
-    if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) == -1 ||
-        listen(fd, acceptQueueSize) == -1)
-    {
-      int e = errno;
-      close(fd);
-      unlink(filename);
-      errno = e;
-      fd = -1;
-    }
-  }
-  return fd;
-}
-
 int connectUNIXSocket(const char* filename) {
   /*struct*/ sockaddr_un addr;
   int fd = createUNIXSocket(filename, &addr);

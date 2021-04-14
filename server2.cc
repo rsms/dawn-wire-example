@@ -244,20 +244,14 @@ const char* adapterTypeName(wgpu::AdapterType t) {
 
 // dumpLogAvailableAdapters prints a list of all adapters and their properties
 void dumpLogAvailableAdapters(dawn_native::Instance* instance) {
+  fprintf(stderr, "Available adapters:\n");
   for (auto&& a : instance->GetAdapters()) {
     wgpu::AdapterProperties p;
     a.GetProperties(&p);
-    dlog("adapter %s\n"
-      "  description: %s\n"
-      "  deviceID:    %u\n"
-      "  vendorID:    0x%x\n"
-      "  backendType: BackendType::%s\n"
-      "  adapterType: AdapterType::%s\n"
-      ,
+    fprintf(stderr, "  %s (%s)\n"
+      "    deviceID=%u, vendorID=0x%x, BackendType::%s, AdapterType::%s\n",
       p.name, p.driverDescription,
-      p.deviceID, p.vendorID,
-      backendTypeName(p.backendType),
-      adapterTypeName(p.adapterType));
+      p.deviceID, p.vendorID, backendTypeName(p.backendType), adapterTypeName(p.adapterType));
   }
 }
 

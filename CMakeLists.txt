@@ -7,7 +7,6 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 set(CMAKE_CXX_STANDARD 14)
-
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -fcolor-diagnostics")
 set(CMAKE_LINK_FLAGS "${CMAKE_LINK_FLAGS} -Wall -fcolor-diagnostics")
 
@@ -15,6 +14,9 @@ add_subdirectory("dawn" EXCLUDE_FROM_ALL)
 
 add_executable(server
   "server.cc"
+  "protocol.cc"
+  "pipe.cc"
+  "debug.cc"
 )
 target_link_libraries(server
   dawn_internal_config
@@ -29,6 +31,9 @@ target_link_libraries(server
 )
 add_executable(client
   "client.cc"
+  "protocol.cc"
+  "pipe.cc"
+  "debug.cc"
 )
 target_link_libraries(client
   dawn_internal_config
@@ -40,59 +45,17 @@ target_link_libraries(client
   "ev"
 )
 
+target_link_directories(server PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/libev/lib )
+target_link_directories(client PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/libev/lib )
 
-add_executable(server2
-  "server2.cc"
-  "protocol.cc"
-  "pipe.cc"
-  "debug.cc"
-)
-target_link_libraries(server2
-  dawn_internal_config
-  dawncpp
-  dawn_proc
-  dawn_common
-  dawn_native
-  dawn_wire
-  dawn_utils
-  glfw
-  "ev"
-)
-add_executable(client2
-  "client2.cc"
-  "protocol.cc"
-  "pipe.cc"
-  "debug.cc"
-)
-target_link_libraries(client2
-  dawn_internal_config
-  dawncpp
-  dawn_proc
-  dawn_common
-  dawn_wire
-  dawn_utils
-  "ev"
-)
-
-target_link_directories(server  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/libev/lib )
-target_link_directories(server2 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/libev/lib )
-target_link_directories(client  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/libev/lib )
-target_link_directories(client2 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/libev/lib )
-
-target_include_directories(server  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/libev/include )
-target_include_directories(server2 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/libev/include )
-target_include_directories(client  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/libev/include )
-target_include_directories(client2 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/libev/include )
+target_include_directories(server PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/libev/include )
+target_include_directories(client PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/libev/include )
 
 if (${CMAKE_BUILD_TYPE} MATCHES "Debug")
-  target_compile_definitions(server  PRIVATE DEBUG=1)
-  target_compile_definitions(server2 PRIVATE DEBUG=1)
-  target_compile_definitions(client  PRIVATE DEBUG=1)
-  target_compile_definitions(client2 PRIVATE DEBUG=1)
+  target_compile_definitions(server PRIVATE DEBUG=1)
+  target_compile_definitions(client PRIVATE DEBUG=1)
 
-  target_compile_options(server  PRIVATE -g -O0 "-ffile-prefix-map=../../=")
-  target_compile_options(server2 PRIVATE -g -O0 "-ffile-prefix-map=../../=")
-  target_compile_options(client  PRIVATE -g -O0 "-ffile-prefix-map=../../=")
-  target_compile_options(client2 PRIVATE -g -O0 "-ffile-prefix-map=../../=")
+  target_compile_options(server PRIVATE -g -O0 "-ffile-prefix-map=../../=")
+  target_compile_options(client PRIVATE -g -O0 "-ffile-prefix-map=../../=")
 endif()
 

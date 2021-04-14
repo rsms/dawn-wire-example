@@ -2,7 +2,16 @@
 #include <unistd.h>
 #include <assert.h>
 #include <functional>
+#include <limits>
+#include <algorithm>
 #include <dawn_wire/Wire.h>
+
+// DEBUG_TRACE_PROTOCOL: define to trace protocol I/O
+// #define DEBUG_TRACE_PROTOCOL
+#if defined(DEBUG_TRACE_PROTOCOL) && !defined(DEBUG_TRACE_PIPE)
+  #define DEBUG_TRACE_PIPE
+#endif
+#include "pipe.hh"
 
 // silence "mangled name of 'ev_set_allocator' will change in C++17"
 _Pragma("GCC diagnostic push")
@@ -12,76 +21,32 @@ _Pragma("GCC diagnostic pop")
 
 typedef struct ev_loop RunLoop;
 
-// IOBuffer is a circular read-write buffer
-template <size_t Capacity>
-struct IOBuffer {
-  char   _storage[Capacity]; // = sizeof() = cap() = max possible chunk size
-  char*  _head = _storage;
-  char*  _tail = _storage;
-
-  void reset();
-
-  size_t cap() const { return Capacity - 1; }
-  size_t len() const { return cap() - avail(); }
-  size_t avail() const {
-    if (_head >= _tail)
-      return cap() - (size_t)((uintptr_t)_head - (uintptr_t)_tail);
-    return (size_t)((uintptr_t)_tail - (uintptr_t)_head);
-  }
-
-  const char* end() const { return &_storage[cap()]; }
-  char* next(const char* p) {
-    assert(p >= &_storage[0] && p < end());
-    return &_storage[(++p - &_storage[0]) % cap()];
-  }
-
-  // addCopy adds up to nbyte bytes from src to the buffer.
-  // returns number of bytes actually copied which is MIN(avail(), nbyte)
-  size_t addCopy(const char* src, size_t nbyte);
-
-  // addRead adds up to nbyte bytes to the buffer by read()-ing from fd
-  ssize_t addRead(int fd, size_t nbyte);
-
-  // takeCopy removes the nbyte oldest bytes, optionally copying them to copyDst.
-  // If copyDst is null, bytes are simply freed up and no copying occurs.
-  // nbyte must be less or equal to len()
-  void takeCopy(char* copyDst, size_t nbyte);
-  void takeDiscard(size_t nbyte) { takeCopy(nullptr, nbyte); }
-
-  // takeWrite writes up to nbyte data in the buffer to fd
-  // nbyte must be less or equal to len()
-  // Returns the value of the write() call (-1: error, 0: EOF, >0: nbyte written)
-  ssize_t takeWrite(int fd, size_t nbyte);
-
-  // takeContiguousRef removes nbyte and returns a pointer to the removed bytes,
-  // if and only if the next nbytes are contiguous, i.e. does not span across the
-  // underlying ring buffer's head & tail.
-  // Returns nullptr on failure.
-  // The returned memory is only valid until the next call to an add*() function.
-  const char* takeContiguousRef(size_t nbyte);
-};
+// dawn buffer sizes
+#define DAWNCMD_MSG_HEADER_SIZE 9  /* "D" <HEXBYTE>{8} */
+#define DAWNCMD_MAX             (4096*32)
+#define DAWNCMD_BUFSIZE         (DAWNCMD_MAX + DAWNCMD_MSG_HEADER_SIZE)
 
 struct DawnClientServerProtocol : public dawn_wire::CommandSerializer {
-  static const size_t DAWNCMD_MAX = 4096*32;
-
-  IOBuffer<DAWNCMD_MAX+10> _rbuf;
-  IOBuffer<4096>           _wbuf;
+  Pipe<DAWNCMD_BUFSIZE + 8> _rbuf; // incoming data (extra space for pipe impl)
+  Pipe<4096>                _wbuf; // outgoing data (in addition to _dawnout)
 
   RunLoop* _rl;
   ev_io    _io;
   size_t   _dawnCmdRLen = 0; // reamining nbytes to read as dawn command buffer
 
-  // _dawncmd is the dawn command buffer for outgoing Dawn command data
+  // _dawnout is the dawn command buffer for outgoing Dawn command data
   struct {
-    char     buf[DAWNCMD_MAX];
-    uint32_t len = 0;
-    uint32_t woffs = 0; // write offset (only used while flush=true)
-    bool     flush = false; // true when ready to be written
-  } _dawncmd;
+    char     bufs[2][DAWNCMD_BUFSIZE];
+    char*    writebuf = bufs[0]; // buffer used for GetCmdSpace
+    uint32_t writelen = DAWNCMD_MSG_HEADER_SIZE; // length of writebuf
+    char*    flushbuf = bufs[1]; // buffer being written to _io.fd
+    uint32_t flushlen = 0; // length of flushbuf (>0 when flushing)
+    uint32_t flushoffs = 0; // start offset of flushbuf
+  } _dawnout;
 
-  // _dawncmdRead is used for temporary storage of incoming dawn command buffers
-  // in the case that they span across IOBuffer boundaries.
-  char _dawncmdRead[DAWNCMD_MAX];
+  // _dawntmp is used for temporary storage of incoming dawn command buffers
+  // in the case that they span across Pipe boundaries.
+  char _dawntmp[DAWNCMD_MAX];
 
   // callbacks
   std::function<void()> onFrame;
@@ -91,12 +56,13 @@ struct DawnClientServerProtocol : public dawn_wire::CommandSerializer {
 
   void start(RunLoop* rl, int fd);
   void stop();
+  bool stopped() const { return _rl == nullptr; }
 
   bool writeFrame();
   bool writeDawnCommands(const char* src, size_t nbyte);
 
   // dawn_wire::CommandSerializer
-  size_t GetMaximumAllocationSize() const override { return sizeof(_dawncmd.buf); }
+  size_t GetMaximumAllocationSize() const override { return DAWNCMD_MAX; }
   void* GetCmdSpace(size_t size) override;
   bool Flush() override;
 

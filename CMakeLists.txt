@@ -44,6 +44,8 @@ target_link_libraries(client
 add_executable(server2
   "server2.cc"
   "protocol.cc"
+  "pipe.cc"
+  "debug.cc"
 )
 target_link_libraries(server2
   dawn_internal_config
@@ -59,6 +61,8 @@ target_link_libraries(server2
 add_executable(client2
   "client2.cc"
   "protocol.cc"
+  "pipe.cc"
+  "debug.cc"
 )
 target_link_libraries(client2
   dawn_internal_config

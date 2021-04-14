@@ -67,8 +67,8 @@ BUILD_LOCKFILE=$PWD/.build.lock
 
 __atexit() {
   set +e
-  _pidfile_kill "$RUN_PIDFILE"
   rm -rf "$BUILD_LOCKFILE"
+  _pidfile_kill "$RUN_PIDFILE"
 }
 trap __atexit EXIT
 
@@ -125,9 +125,9 @@ fi
 
 FSWATCH_ARGS=()
 if [[ "$@" == *"client"* && "$@" != *"server"* ]]; then
-  FSWATCH_ARGS=( "$USER_PWD"/client*.cc "$USER_PWD"/protocol*.* )
+  FSWATCH_ARGS=( "$USER_PWD"/{client,protocol,pipe,debug}*.{hh,cc} )
 elif [[ "$@" == *"server"* && "$@" != *"client"* ]]; then
-  FSWATCH_ARGS=( "$USER_PWD"/server*.cc "$USER_PWD"/protocol*.* )
+  FSWATCH_ARGS=( "$USER_PWD"/{server,protocol,pipe,debug}*.{hh,cc} )
 else
   FSWATCH_ARGS=( --exclude='.*' --include='\.(c|cc|cpp|h|s|S)$' "$USER_PWD" )
 fi

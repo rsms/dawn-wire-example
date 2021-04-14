@@ -402,8 +402,14 @@ void onPollTimeout(RunLoop* rl, ev_timer* w, int revents) {
 
 void onFrameTimer(RunLoop* rl, ev_timer* w, int revents) {
   if (conn0) {
-    // send FRAME message to client
-    conn0->proto.writeFrame();
+    if (conn0->proto.stopped()) {
+      conn0->close();
+      delete conn0;
+      conn0 = nullptr;
+    } else {
+      // send FRAME message to client
+      conn0->proto.writeFrame();
+    }
   }
   ev_timer_again(rl, w);
 }

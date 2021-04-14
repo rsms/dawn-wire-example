@@ -14,7 +14,7 @@ fi
 
 cd dawn
 echo "cd $PWD"
-git checkout --detach 40d1c83362bebfe0fede9ca3e2bf802d6b217455 --
+git checkout --detach e19004566464cff0adaa26fb129ee6e7406bd747 --
 
 cp scripts/standalone.gclient .gclient
 echo gclient sync

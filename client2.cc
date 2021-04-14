@@ -241,20 +241,23 @@ void runloop_main(int fd) {
   RunLoop* rl = EV_DEFAULT;
   FDSetNonBlock(fd);
 
+  proto.onFrame = []() {
+    render_frame();
+  };
+  proto.onDawnBuffer = [](const char* data, size_t len) {
+    dlog("onDawnBuffer len=%zu", len);
+    assert(wireClient != nullptr);
+    if (wireClient->HandleCommands(data, len) == nullptr)
+      dlog("wireClient->HandleCommands FAILED");
+  };
+  proto.start(rl, fd);
+
   initDawnWire();
   initDawnPipeline();
 
   ::memset(&conn, 0, sizeof(conn));
   conn.fd = fd;
   //c2sBuf->w = fd;
-
-  proto.onFrame = []() {
-    render_frame();
-  };
-  proto.onDawnBuffer = [](const void* data, size_t len) {
-    dlog("TODO onDawnBuffer len=%zu", len);
-  };
-  proto.start(rl, fd);
 
   ev_run(rl, 0);
   dlog("exit runloop");

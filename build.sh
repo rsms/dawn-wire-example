@@ -98,7 +98,12 @@ _build() {
     else
       if ! $printed_msg; then
         printed_msg=true
-        echo "waiting for build lock..."
+        # is lockfile stale? (older than 15 minutes)
+        if find "$BUILD_LOCKFILE" -mmin +15 >/dev/null 2>&1; then
+          rm -f "$BUILD_LOCKFILE"
+          continue
+        fi
+        echo "waiting for build lock... ($OUT_DIR/.build.lock)"
       fi
       sleep 0.5
     fi

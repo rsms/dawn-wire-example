@@ -1,6 +1,7 @@
 #pragma once
 #include <limits>
 #include <algorithm>
+#include <cstring>
 #include <vector>
 #include <unistd.h> // read, write, close
 

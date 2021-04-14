@@ -1,6 +1,7 @@
 #include "protocol.hh"
 #include "debug.hh"
 
+#include <cstdio>
 #include <errno.h>
 #include <unistd.h> // pipe
 #include <sys/socket.h>

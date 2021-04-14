@@ -62,10 +62,10 @@ struct DawnRemoteProtocol : public dawn_wire::CommandSerializer {
   FramebufferInfo _fbinfo;
 
   // callbacks, client and server
-  std::function<void()> onFrame;
   std::function<void(const char* data, size_t len)> onDawnBuffer;
 
   // callbacks, client only
+  std::function<void()> onFrame; // server is ready for a new frame
   // onFramebufferInfo is called whenever the underlying framebuffer changes.
   // The argument provided is the same as returned by the fbinfo() method.
   std::function<void(const FramebufferInfo& fbinfo)> onFramebufferInfo;

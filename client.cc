@@ -208,8 +208,10 @@ bool animate = true;
 
 void render_frame() {
   fc++;
-  fprintf(stderr, "\n");
-  dlog("FRAME %u", fc);
+
+  #if DEBUG
+  fprintf(stderr, "\nFRAME\n");
+  #endif
 
   float RED   = 0.4;
   float GREEN = 0.4;

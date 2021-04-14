@@ -120,6 +120,8 @@ dawn_native::Adapter backendAdapter;
 wgpu::Device         device;
 wgpu::Surface        surface;
 wgpu::SwapChain      swapchain;
+wgpu::TextureFormat  swapchainTexFormat = wgpu::TextureFormat::BGRA8Unorm;
+wgpu::TextureUsage   swapchainUsage = wgpu::TextureUsage::RenderAttachment;
 
 
 // Conn is a connection to a client
@@ -259,6 +261,20 @@ void dumpLogAvailableAdapters(dawn_native::Instance* instance) {
   }
 }
 
+// onWindowFramebufferResize is called when a window's framebuffer has changed size
+// width & height are in pixels (the framebuffer size)
+void onWindowFramebufferResize(GLFWwindow* window, int width, int height) {
+  dlog("onWindowFramebufferResize width=%d, height=%d", width, height);
+  // reconfigure swapchain
+  swapchain.Configure(swapchainTexFormat, swapchainUsage, (uint32_t)width, (uint32_t)height);
+}
+
+// onWindowResize is called when a window has been resized
+// Note: onWindowResize is called _after_ onWindowFramebufferResize has been called.
+// width & height are in screen coordinates (i.e. dp)
+void onWindowResize(GLFWwindow* window, int width, int height) {
+  // dlog("onWindowResize width=%d, height=%d", width, height);
+}
 
 void createOSWindow() {
   assert(window == nullptr);
@@ -273,6 +289,9 @@ void createOSWindow() {
   window = glfwCreateWindow(640, 480, "hello-wire", /*monitor*/nullptr, nullptr);
   if (!window)
     return;
+
+  glfwSetFramebufferSizeCallback(window, onWindowFramebufferResize);
+  glfwSetWindowSizeCallback(window, onWindowResize);
 }
 
 void createDawnDevice() {
@@ -314,11 +333,19 @@ void createDawnSwapChain() {
   surface = utils::CreateSurfaceForWindow(instance->Get(), window); // global var
 
   wgpu::SwapChainDescriptor desc;
-  desc.usage = wgpu::TextureUsage::RenderAttachment;
+  desc.format = swapchainTexFormat;
+  desc.usage = swapchainUsage;
   desc.width = 640;
   desc.height = 480;
-  desc.format = wgpu::TextureFormat::BGRA8Unorm;
   desc.presentMode = wgpu::PresentMode::Mailbox;
+
+  // if we have a window, ask for its actual framebuffer size
+  if (window) {
+    int w, h;
+    glfwGetFramebufferSize(window, &w, &h);
+    desc.width = (uint32_t)w;
+    desc.height = (uint32_t)h;
+  }
 
   swapchain = device.CreateSwapChain(surface, &desc); // global var
 }

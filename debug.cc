@@ -16,7 +16,7 @@ ssize_t debugFmtBytes(char* dst, size_t dstsize, const char* data, size_t datale
         return -1;
     }
     char c = data[srci];
-    if (c != '"' && !std::isspace(c) && std::isprint(c)) {
+    if (c == ' ' || (c != '"' && !std::isspace(c) && std::isprint(c))) {
       dst[dsti++] = c;
     } else {
       if (dsti + 2 > dstend)

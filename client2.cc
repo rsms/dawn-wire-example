@@ -125,7 +125,8 @@ wgpu::Device         device;
 wgpu::SwapChain      swapchain;
 wgpu::RenderPipeline pipeline;
 
-//dawn_wire::ReservedSwapChain swapchainReservation;
+dawn_wire::ReservedDevice    deviceReservation;
+dawn_wire::ReservedSwapChain swapchainReservation;
 
 static void printDeviceError(WGPUErrorType errorType, const char* message, void*) {
   const char* errorTypeName = "";
@@ -154,15 +155,18 @@ void initDawnWire() {
   clientDesc.serializer = &proto;
   wireClient = new dawn_wire::WireClient(clientDesc); // global var
 
-  auto deviceReservation = wireClient->ReserveDevice();
+  deviceReservation = wireClient->ReserveDevice();
   device = wgpu::Device::Acquire(deviceReservation.device); // global var
 
   DawnProcTable procs = dawn_wire::client::GetProcs();
   procs.deviceSetUncapturedErrorCallback(device.Get(), printDeviceError, nullptr);
   dawnProcSetProcs(&procs);
 
-  auto swapchainReservation = wireClient->ReserveSwapChain(device.Get());
+  swapchainReservation = wireClient->ReserveSwapChain(device.Get());
   swapchain = wgpu::SwapChain::Acquire(swapchainReservation.swapchain);
+
+  // tell server what we reserved
+  proto.sendReservation(swapchainReservation);
 
   // These values are hardcoded in the server and must match. In the future we
   // could send these as part of the initial handshake.
@@ -237,12 +241,6 @@ void render_frame() {
 
   swapchain.Present();
 
-  // // tell server we are writing a new frame
-  // int fd = c2sBuf->w;
-  // ssize_t z = ::write(fd, "FRAME\n", 6);
-
-  // if (!c2sBuf->Flush()) // blocks on write I/O
-  //   dlog("c2sBuf->Flush() failed");
   proto.Flush();
 }
 
@@ -275,23 +273,14 @@ void runloop_main(int fd) {
     if (wireClient->HandleCommands(data, len) == nullptr)
       dlog("wireClient->HandleCommands FAILED");
   };
-  proto.onFramebufferInfo =[](const DawnRemoteProtocol::FramebufferInfo& fbinfo) {
+  proto.onFramebufferInfo = [](const DawnRemoteProtocol::FramebufferInfo& fbinfo) {
     dlog("onFramebufferInfo");
-
+    // // [WORK IN PROGRESS] replace/update swapchain
     // if (swapchain)
     //   wireClient->ReclaimSwapChainReservation(swapchainReservation);
     // swapchainReservation = wireClient->ReserveSwapChain(device.Get());
     // swapchain = wgpu::SwapChain::Acquire(swapchainReservation.swapchain);
-
-    // // These values are hardcoded in the server and must match. In the future we
-    // // could send these as part of the initial handshake.
-    // //assert(deviceReservation.id == 1);
-    // //assert(deviceReservation.generation == 0);
-    // assert(swapchainReservation.id == 1);
-    // assert(swapchainReservation.generation == 0);
-    // assert(swapchainReservation.deviceId == 1);
-    // assert(swapchainReservation.deviceGeneration == 0);
-
+    // proto.sendReservation(swapchainReservation);
   };
   proto.start(rl, fd);
 

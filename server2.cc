@@ -132,9 +132,9 @@ DawnRemoteProtocol::FramebufferInfo framebufferInfo = {
 
 // Conn is a connection to a client
 struct Conn {
-  uint32_t                 id;
-  DawnRemoteProtocol _proto;
-  dawn_wire::WireServer    _wireServer;
+  uint32_t              id;
+  DawnRemoteProtocol    _proto;
+  dawn_wire::WireServer _wireServer;
 
   Conn(uint32_t id_) :
     id(id_),
@@ -147,6 +147,19 @@ struct Conn {
         dlog("_wireServer.HandleCommands FAILED");
       if (!_proto.Flush())
         dlog("_proto.Flush() FAILED");
+    };
+
+    _proto.onSwapchainReservation = [this](const dawn_wire::ReservedSwapChain& scr) {
+      dlog("onSwapchainReservation");
+      // if (!_wireServer.InjectDevice(device.Get(), scr.deviceId, scr.deviceGeneration)) {
+      //   dlog("onDeviceReservation _wireServer.InjectDevice FAILED");
+      //   return;
+      // }
+      if (!_wireServer.InjectSwapChain(
+        swapchain.Get(), scr.id, scr.generation, scr.deviceId, scr.deviceGeneration))
+      {
+        dlog("onSwapchainReservation _wireServer.InjectSwapChain FAILED");
+      }
     };
 
     // Hardcoded generation and IDs need to match what's produced by the client
@@ -282,11 +295,12 @@ void createDawnSwapChain();
 // width & height are in pixels (the framebuffer size)
 void onWindowFramebufferResize(GLFWwindow* window, int width, int height) {
   dlog("onWindowFramebufferResize width=%d, height=%d", width, height);
-  // update framebuffer info and swapchain
-  updateFramebufferInfo((uint32_t)width, (uint32_t)height);
-  createDawnSwapChain(); // note: can't use swapchain.Configure when we use a surface
-  if (conn0)
-    conn0->sendFramebufferInfo();
+  // [WORK IN PROGRESS]
+  // // update framebuffer info and swapchain
+  // updateFramebufferInfo((uint32_t)width, (uint32_t)height);
+  // createDawnSwapChain(); // note: can't use swapchain.Configure when we use a surface
+  // if (conn0)
+  //   conn0->sendFramebufferInfo();
 }
 
 // onWindowResize is called when a window has been resized

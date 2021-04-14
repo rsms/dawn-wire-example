@@ -48,17 +48,21 @@
 // protocol messages
 //
 // message        = metaMsg | frameMsg | dawncmdMsg
-// frameInfoMsg   = "I" width height scale
+// frameInfoMsg   = "I" <TODO DATA>
 // frameSignalMsg = "F"
+// reservationMsg = "R" <TODO DATA>
 // dawncmdMsg     = "D" size
 // size           = <uint32 in big-endian order>
 //
 #define MSGT_FB_INFO       'I' /* Framebuffer info */
 #define MSGT_FRAME_SIGNAL  'F' /* Frame signal */
+#define MSGT_RESERVATION   'R' /* Device and Swapchain reservations */
 #define MSGT_DAWNCMD       'D' /* Dawn command buffer */
 
 // FB_INFO_SIZE is the number of bytes occupied by encoded framebuffer info
 #define FB_INFO_SIZE sizeof(DawnRemoteProtocol::FramebufferInfo)
+
+#define RESERVATION_SIZE (sizeof(dawn_wire::ReservedDevice) + sizeof(dawn_wire::ReservedSwapChain))
 
 
 // encodeDawnCmdHeader writes a MSGT_DAWNCMD header of DAWNCMD_MSG_HEADER_SIZE bytes to dst.
@@ -82,11 +86,54 @@ static void encodeFramebufferInfo(char* dst, const DawnRemoteProtocol::Framebuff
   *((DawnRemoteProtocol::FramebufferInfo*)&dst[1]) = info; // FIXME
 }
 
-
-static void DawnRemoteProtocol_doIO(RunLoop* rl, ev_io* w, int revents) {
-  DawnRemoteProtocol* p = (DawnRemoteProtocol*)w->data;
-  p->doIO(revents);
+static void encodeReservation(char* dst, const dawn_wire::ReservedSwapChain& scr) {
+  dst[0] = MSGT_RESERVATION;
+  *((dawn_wire::ReservedSwapChain*)&dst[1]) = scr; // FIXME
 }
+
+static void decodeReservation(const char* src, dawn_wire::ReservedSwapChain* scr) {
+  assert(src[0] == MSGT_RESERVATION);
+  *scr = *((dawn_wire::ReservedSwapChain*)&src[1]); // FIXME
+}
+
+
+
+bool DawnRemoteProtocol::sendFrameSignal() {
+  if (_wbuf.avail() < 1) {
+    trace("not enough buffer space in _wbuf");
+    return false;
+  }
+  if (_wbuf.writec(MSGT_FRAME_SIGNAL) != 1)
+    return false;
+  setNeedsWriteFlush();
+  return true;
+}
+
+bool DawnRemoteProtocol::sendFramebufferInfo(const FramebufferInfo& info) {
+  char tmp[FB_INFO_SIZE+1];
+  if (_wbuf.avail() < sizeof(tmp)) {
+    trace("not enough buffer space in _wbuf");
+    return false;
+  }
+  encodeFramebufferInfo(tmp, info);
+  _wbuf.write(tmp, sizeof(tmp));
+  setNeedsWriteFlush();
+  return true;
+}
+
+bool DawnRemoteProtocol::sendReservation(const dawn_wire::ReservedSwapChain& scr) {
+  char tmp[RESERVATION_SIZE+1];
+  if (_wbuf.avail() < sizeof(tmp)) {
+    trace("not enough buffer space in _wbuf");
+    return false;
+  }
+  encodeReservation(tmp, scr);
+  _wbuf.write(tmp, sizeof(tmp));
+  setNeedsWriteFlush();
+  return true;
+}
+
+
 
 bool DawnRemoteProtocol::maybeReadIncomingDawnCmd() {
   assert(_dawnCmdRLen > 0);
@@ -111,7 +158,7 @@ bool DawnRemoteProtocol::maybeReadIncomingDawnCmd() {
 
 // readMsg reads a protocol message from the read buffer (_rbuf)
 bool DawnRemoteProtocol::readMsg() {
-  char tmp[MAX(DAWNCMD_MSG_HEADER_SIZE, FB_INFO_SIZE)];
+  char tmp[MAX(MAX(DAWNCMD_MSG_HEADER_SIZE, FB_INFO_SIZE), RESERVATION_SIZE) + 1];
   while (_rbuf.len() > 0) {
     switch (_rbuf.at(0)) {
 
@@ -120,6 +167,15 @@ bool DawnRemoteProtocol::readMsg() {
       _rbuf.read(tmp, FB_INFO_SIZE + 1);
       decodeFramebufferInfo(tmp, &_fbinfo);
       onFramebufferInfo(_fbinfo);
+      break;
+    }
+
+    case MSGT_RESERVATION: {
+      trace("MSGT_RESERVATION");
+      _rbuf.read(tmp, RESERVATION_SIZE + 1);
+      dawn_wire::ReservedSwapChain scr;
+      decodeReservation(tmp, &scr);
+      onSwapchainReservation(scr);
       break;
     }
 
@@ -158,6 +214,11 @@ bool DawnRemoteProtocol::readMsg() {
   } // while
 
   return true;
+}
+
+static void DawnRemoteProtocol_doIO(RunLoop* rl, ev_io* w, int revents) {
+  DawnRemoteProtocol* p = (DawnRemoteProtocol*)w->data;
+  p->doIO(revents);
 }
 
 void DawnRemoteProtocol::doIO(int revents) {
@@ -266,29 +327,6 @@ void DawnRemoteProtocol::setNeedsWriteFlush2() {
     ev_io_modify(&_io, _io.events | EV_WRITE);
     ev_io_start(_rl, &_io);
   }
-}
-
-bool DawnRemoteProtocol::sendFrameSignal() {
-  if (_wbuf.avail() < 1) {
-    trace("not enough buffer space in _wbuf");
-    return false;
-  }
-  if (_wbuf.writec(MSGT_FRAME_SIGNAL) != 1)
-    return false;
-  setNeedsWriteFlush();
-  return true;
-}
-
-bool DawnRemoteProtocol::sendFramebufferInfo(const FramebufferInfo& info) {
-  char tmp[FB_INFO_SIZE+1];
-  if (_wbuf.avail() < sizeof(tmp)) {
-    trace("not enough buffer space in _wbuf");
-    return false;
-  }
-  encodeFramebufferInfo(tmp, info);
-  _wbuf.write(tmp, sizeof(tmp));
-  setNeedsWriteFlush();
-  return true;
 }
 
 void* DawnRemoteProtocol::GetCmdSpace(size_t size) {

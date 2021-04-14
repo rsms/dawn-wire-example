@@ -6,6 +6,7 @@
 #include <algorithm>
 
 #include <dawn_wire/Wire.h>
+#include <dawn_wire/WireClient.h>
 #include <dawn/webgpu_cpp.h>
 
 // DEBUG_TRACE_PROTOCOL: define to trace protocol I/O
@@ -57,18 +58,25 @@ struct DawnRemoteProtocol : public dawn_wire::CommandSerializer {
   // in the case that they span across Pipe boundaries.
   char _dawntmp[DAWNCMD_MAX];
 
-  // framebuffer info, used by client, provided by server
+  // framebuffer info (only used by client)
   FramebufferInfo _fbinfo;
 
   // callbacks, client and server
   std::function<void()> onFrame;
   std::function<void(const char* data, size_t len)> onDawnBuffer;
+
   // callbacks, client only
   // onFramebufferInfo is called whenever the underlying framebuffer changes.
   // The argument provided is the same as returned by the fbinfo() method.
   std::function<void(const FramebufferInfo& fbinfo)> onFramebufferInfo;
 
+  // callbacks, server only
+  // onSwapchainReservation is called when the client has made a swapchain reservation.
+  std::function<void(const dawn_wire::ReservedSwapChain&)> onSwapchainReservation;
+
   int fd() const { return _io.fd; }
+
+  // client only
   const FramebufferInfo& fbinfo() const { return _fbinfo; }
 
   void start(RunLoop* rl, int fd);
@@ -77,6 +85,7 @@ struct DawnRemoteProtocol : public dawn_wire::CommandSerializer {
 
   bool sendFrameSignal();
   bool sendFramebufferInfo(const FramebufferInfo& info);
+  bool sendReservation(const dawn_wire::ReservedSwapChain& scr);
   // bool sendDawnCommands(const char* src, size_t nbyte);
 
   // dawn_wire::CommandSerializer

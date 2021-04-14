@@ -125,16 +125,39 @@ wgpu::Device         device;
 wgpu::SwapChain      swapchain;
 wgpu::RenderPipeline pipeline;
 
+static void printDeviceError(WGPUErrorType errorType, const char* message, void*) {
+  const char* errorTypeName = "";
+  switch (errorType) {
+    case WGPUErrorType_Validation:
+      errorTypeName = "Validation";
+      break;
+    case WGPUErrorType_OutOfMemory:
+      errorTypeName = "Out of memory";
+      break;
+    case WGPUErrorType_Unknown:
+      errorTypeName = "Unknown";
+      break;
+    case WGPUErrorType_DeviceLost:
+      errorTypeName = "Device lost";
+      break;
+    default:
+      UNREACHABLE();
+      return;
+  }
+  std::cerr << "device error: " << errorTypeName << " error: " << message << std::endl;
+}
+
 void initDawnWire() {
   dawn_wire::WireClientDescriptor clientDesc = {};
   clientDesc.serializer = &proto;
   wireClient = new dawn_wire::WireClient(clientDesc); // global var
 
-  DawnProcTable procs = dawn_wire::client::GetProcs();
-  dawnProcSetProcs(&procs);
-
   auto deviceReservation = wireClient->ReserveDevice();
   device = wgpu::Device::Acquire(deviceReservation.device); // global var
+
+  DawnProcTable procs = dawn_wire::client::GetProcs();
+  procs.deviceSetUncapturedErrorCallback(device.Get(), printDeviceError, nullptr);
+  dawnProcSetProcs(&procs);
 
   auto swapchainReservation = wireClient->ReserveSwapChain(device.Get());
   swapchain = wgpu::SwapChain::Acquire(swapchainReservation.swapchain);

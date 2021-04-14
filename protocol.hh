@@ -4,7 +4,9 @@
 #include <functional>
 #include <limits>
 #include <algorithm>
+
 #include <dawn_wire/Wire.h>
+#include <dawn/webgpu_cpp.h>
 
 // DEBUG_TRACE_PROTOCOL: define to trace protocol I/O
 // #define DEBUG_TRACE_PROTOCOL
@@ -26,13 +28,20 @@ typedef struct ev_loop RunLoop;
 #define DAWNCMD_MAX             (4096*32)
 #define DAWNCMD_BUFSIZE         (DAWNCMD_MAX + DAWNCMD_MSG_HEADER_SIZE)
 
-struct DawnClientServerProtocol : public dawn_wire::CommandSerializer {
+struct DawnRemoteProtocol : public dawn_wire::CommandSerializer {
+  struct FramebufferInfo {
+    wgpu::TextureFormat textureFormat;
+    wgpu::TextureUsage  textureUsage;
+    uint32_t width, height; // pixels, not dp
+    uint16_t dpscale; // 1dp = Npx (10x percent; 0% = 0, 100% = 1000, 250% = 2500 ...)
+  };
+
   Pipe<DAWNCMD_BUFSIZE + 8> _rbuf; // incoming data (extra space for pipe impl)
   Pipe<4096>                _wbuf; // outgoing data (in addition to _dawnout)
 
   RunLoop* _rl;
   ev_io    _io;
-  size_t   _dawnCmdRLen = 0; // reamining nbytes to read as dawn command buffer
+  uint32_t _dawnCmdRLen = 0; // reamining nbytes to read as dawn command buffer
 
   // _dawnout is the dawn command buffer for outgoing Dawn command data
   struct {
@@ -48,18 +57,27 @@ struct DawnClientServerProtocol : public dawn_wire::CommandSerializer {
   // in the case that they span across Pipe boundaries.
   char _dawntmp[DAWNCMD_MAX];
 
-  // callbacks
+  // framebuffer info, used by client, provided by server
+  FramebufferInfo _fbinfo;
+
+  // callbacks, client and server
   std::function<void()> onFrame;
   std::function<void(const char* data, size_t len)> onDawnBuffer;
+  // callbacks, client only
+  // onFramebufferInfo is called whenever the underlying framebuffer changes.
+  // The argument provided is the same as returned by the fbinfo() method.
+  std::function<void(const FramebufferInfo& fbinfo)> onFramebufferInfo;
 
   int fd() const { return _io.fd; }
+  const FramebufferInfo& fbinfo() const { return _fbinfo; }
 
   void start(RunLoop* rl, int fd);
   void stop();
   bool stopped() const { return _rl == nullptr; }
 
-  bool writeFrame();
-  bool writeDawnCommands(const char* src, size_t nbyte);
+  bool sendFrameSignal();
+  bool sendFramebufferInfo(const FramebufferInfo& info);
+  // bool sendDawnCommands(const char* src, size_t nbyte);
 
   // dawn_wire::CommandSerializer
   size_t GetMaximumAllocationSize() const override { return DAWNCMD_MAX; }
@@ -68,12 +86,12 @@ struct DawnClientServerProtocol : public dawn_wire::CommandSerializer {
 
 
   // internal
-  void beginFrame();
   inline void setNeedsWriteFlush() {
     if ((_io.events & EV_WRITE) == 0)
       setNeedsWriteFlush2();
   }
   void setNeedsWriteFlush2();
   void doIO(int revents);
-  bool maybeFlushIncomingDawnCmd();
+  bool readMsg();
+  bool maybeReadIncomingDawnCmd();
 };

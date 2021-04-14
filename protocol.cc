@@ -45,12 +45,50 @@
   ({__typeof__ (a) _a = (a); __typeof__ (b) _b = (b); _a < _b ? _a : _b; })
 
 
-static void DawnClientServerProtocol_doIO(RunLoop* rl, ev_io* w, int revents) {
-  DawnClientServerProtocol* p = (DawnClientServerProtocol*)w->data;
+// protocol messages
+//
+// message        = metaMsg | frameMsg | dawncmdMsg
+// frameInfoMsg   = "I" width height scale
+// frameSignalMsg = "F"
+// dawncmdMsg     = "D" size
+// size           = <uint32 in big-endian order>
+//
+#define MSGT_FB_INFO       'I' /* Framebuffer info */
+#define MSGT_FRAME_SIGNAL  'F' /* Frame signal */
+#define MSGT_DAWNCMD       'D' /* Dawn command buffer */
+
+// FB_INFO_SIZE is the number of bytes occupied by encoded framebuffer info
+#define FB_INFO_SIZE sizeof(DawnRemoteProtocol::FramebufferInfo)
+
+
+// encodeDawnCmdHeader writes a MSGT_DAWNCMD header of DAWNCMD_MSG_HEADER_SIZE bytes to dst.
+static void encodeDawnCmdHeader(char* dst, uint32_t dawncmdlen) {
+  dst[0] = MSGT_DAWNCMD;
+  *((uint32_t*)&dst[1]) = htonl(dawncmdlen);
+}
+
+static void decodeDawnCmdHeader(const char* src, uint32_t* dawncmdlen) {
+  assert(src[0] == MSGT_DAWNCMD);
+  *dawncmdlen = ntohl(*((uint32_t*)&src[1]));
+}
+
+static void decodeFramebufferInfo(const char* src, DawnRemoteProtocol::FramebufferInfo* fbinfo) {
+  assert(src[0] == MSGT_FB_INFO);
+  *fbinfo = *((DawnRemoteProtocol::FramebufferInfo*)&src[1]); // FIXME
+}
+
+static void encodeFramebufferInfo(char* dst, const DawnRemoteProtocol::FramebufferInfo& info) {
+  dst[0] = MSGT_FB_INFO;
+  *((DawnRemoteProtocol::FramebufferInfo*)&dst[1]) = info; // FIXME
+}
+
+
+static void DawnRemoteProtocol_doIO(RunLoop* rl, ev_io* w, int revents) {
+  DawnRemoteProtocol* p = (DawnRemoteProtocol*)w->data;
   p->doIO(revents);
 }
 
-bool DawnClientServerProtocol::maybeFlushIncomingDawnCmd() {
+bool DawnRemoteProtocol::maybeReadIncomingDawnCmd() {
   assert(_dawnCmdRLen > 0);
   assert(_dawnCmdRLen <= DAWNCMD_MAX);
   if (_rbuf.len() < _dawnCmdRLen)
@@ -71,12 +109,64 @@ bool DawnClientServerProtocol::maybeFlushIncomingDawnCmd() {
   return true;
 }
 
-void DawnClientServerProtocol::doIO(int revents) {
+// readMsg reads a protocol message from the read buffer (_rbuf)
+bool DawnRemoteProtocol::readMsg() {
+  char tmp[MAX(DAWNCMD_MSG_HEADER_SIZE, FB_INFO_SIZE)];
+  while (_rbuf.len() > 0) {
+    switch (_rbuf.at(0)) {
+
+    case MSGT_FB_INFO: {
+      trace("MSGT_FB_INFO");
+      _rbuf.read(tmp, FB_INFO_SIZE + 1);
+      decodeFramebufferInfo(tmp, &_fbinfo);
+      onFramebufferInfo(_fbinfo);
+      break;
+    }
+
+    case MSGT_FRAME_SIGNAL: {
+      trace("MSGT_FRAME_SIGNAL");
+      _rbuf.discard(1);
+      if (_dawnout.flushlen == 0) {
+        onFrame(); // user callback
+      } else {
+        // a new frame started before we had a chance to finish writing the last frame
+        dlog("WARNING: new frame while still writing old frame; skipping this frame");
+      }
+      break;
+    }
+
+    case MSGT_DAWNCMD: {
+      trace("MSGT_DAWNCMD _rbuf.len() = %zu, _rbuf[0] = 0x%02X", _rbuf.len(), _rbuf.at(0));
+      if (_rbuf.len() >= DAWNCMD_MSG_HEADER_SIZE) {
+        _rbuf.read(tmp, DAWNCMD_MSG_HEADER_SIZE);
+        decodeDawnCmdHeader(tmp, &_dawnCmdRLen);
+        trace("start reading dawn command buffer of size %u", _dawnCmdRLen);
+        maybeReadIncomingDawnCmd();
+      }
+      break;
+    }
+
+    default: {
+      // unexpected/corrupt message data
+      char c = _rbuf.at(0);
+      errlog("unexpected message (first byte: '%c' 0x%02x, rbuf.len(): %zu)", c, c, _rbuf.len());
+      trace("closing connection");
+      stop();
+      return false;
+    }
+    } // switch
+  } // while
+
+  return true;
+}
+
+void DawnRemoteProtocol::doIO(int revents) {
   // dlog("onConnIO %s %s",
   //   revents & EV_READ ? "EV_READ" : "",
   //   revents & EV_WRITE ? "EV_WRITE" : "");
 
   if (revents & EV_READ) {
+    // read into _rbuf
     ssize_t n = _rbuf.readFromFD(_io.fd, _rbuf.cap()) > 0;
     if (n <= 0) {
       if (n < 0) {
@@ -89,39 +179,12 @@ void DawnClientServerProtocol::doIO(int revents) {
       return;
     }
     trace("read %zd bytes into _rbuf; _rbuf.len() = %zu", n, _rbuf.len());
-
     if (_dawnCmdRLen > 0) {
-      trace("maybeFlushIncomingDawnCmd");
-      maybeFlushIncomingDawnCmd();
+      trace("maybeReadIncomingDawnCmd");
+      maybeReadIncomingDawnCmd();
     } else {
-      if (_rbuf.len() > 0 && _rbuf.at(0) == 'F') {
-        trace("FRAME");
-        _rbuf.discard(1);
-        beginFrame();
-      }
-
-      trace("_rbuf.len() = %zu, _rbuf[0] = 0x%02X", _rbuf.len(), _rbuf.at(0));
-
-      if (_rbuf.len() >= 9 && _rbuf.at(0) == 'D') {
-        char buf[10];
-        _rbuf.read(buf, 9);
-        buf[9] = '\0';
-        long l = strtol(&buf[1], NULL, 16);
-        if (l < 1) {
-          trace("bad D message");
-          stop();
-          return;
-        }
-        _dawnCmdRLen = (size_t)l;
-        trace("start reading dawn command buffer of size %zu", _dawnCmdRLen);
-        maybeFlushIncomingDawnCmd();
-      } else if (_rbuf.len() > 0) {
-        errlog("unexpected message (first byte: '%c' 0x%02x, rbuf.len(): %zu)",
-          _rbuf.at(0), _rbuf.at(0), _rbuf.len());
-        trace("closing connection");
-        stop();
+      if (!readMsg())
         return;
-      }
     }
   }
 
@@ -145,7 +208,7 @@ void DawnClientServerProtocol::doIO(int revents) {
       } else {
         // we weren't able to write all of _dawnout.flushbuf; return and wait for more EV_WRITE
         trace("_dawnout flush more");
-        assert(_dawnout.flushlen < _dawnout.flushoffs);
+        assert(_dawnout.flushoffs < _dawnout.flushlen);
         return;
       }
     }
@@ -170,7 +233,7 @@ void DawnClientServerProtocol::doIO(int revents) {
   }
 }
 
-void DawnClientServerProtocol::start(RunLoop* rl, int fd) {
+void DawnRemoteProtocol::start(RunLoop* rl, int fd) {
   trace("START");
   _rbuf.clear();
   _wbuf.clear();
@@ -181,11 +244,11 @@ void DawnClientServerProtocol::start(RunLoop* rl, int fd) {
 
   _rl = rl;
   _io.data = (void*)this;
-  ev_io_init(&_io, DawnClientServerProtocol_doIO, fd, EV_READ);
+  ev_io_init(&_io, DawnRemoteProtocol_doIO, fd, EV_READ);
   ev_io_start(rl, &_io);
 }
 
-void DawnClientServerProtocol::stop() {
+void DawnRemoteProtocol::stop() {
   trace("STOP");
   // reset _dawnout
   _dawnout.writelen = DAWNCMD_MSG_HEADER_SIZE;
@@ -197,7 +260,7 @@ void DawnClientServerProtocol::stop() {
   }
 }
 
-void DawnClientServerProtocol::setNeedsWriteFlush2() {
+void DawnRemoteProtocol::setNeedsWriteFlush2() {
   if (_rl != nullptr) {
     ev_io_stop(_rl, &_io);
     ev_io_modify(&_io, _io.events | EV_WRITE);
@@ -205,54 +268,30 @@ void DawnClientServerProtocol::setNeedsWriteFlush2() {
   }
 }
 
-bool DawnClientServerProtocol::writeFrame() {
+bool DawnRemoteProtocol::sendFrameSignal() {
   if (_wbuf.avail() < 1) {
-    trace("not enough buffer space for dawn command buffer");
+    trace("not enough buffer space in _wbuf");
     return false;
   }
-  if (_wbuf.write("F", 1) != 1)
+  if (_wbuf.writec(MSGT_FRAME_SIGNAL) != 1)
     return false;
   setNeedsWriteFlush();
   return true;
 }
 
-bool DawnClientServerProtocol::writeDawnCommands(const char* src, size_t nbyte) {
-  const size_t header_size = 9;
-  size_t needbytes = nbyte + header_size;
-
-  // proto buffer must be at least the size of the dawn command buffer + header
-  // to be able to succeed at all.
-  assert(_wbuf.cap() >= needbytes);
-
-  // if there's no room, ask the caller to try again later
-  if (_wbuf.avail() < needbytes) {
-    trace("not enough buffer space for dawn command buffer");
+bool DawnRemoteProtocol::sendFramebufferInfo(const FramebufferInfo& info) {
+  char tmp[FB_INFO_SIZE+1];
+  if (_wbuf.avail() < sizeof(tmp)) {
+    trace("not enough buffer space in _wbuf");
     return false;
   }
-
-  // write header: "D" <HEXBYTE>{8}
-  char buf[header_size + 1];
-  assert(nbyte <= 0xFFFFFFFF);
-  int d = snprintf(buf, sizeof(buf), "D%08x", (uint32_t)nbyte);
-  assert(d == header_size);
-  size_t n = _wbuf.write(buf, header_size);
-  assert(n == header_size);
-  n = _wbuf.write(src, nbyte);
-  assert(n == nbyte);
+  encodeFramebufferInfo(tmp, info);
+  _wbuf.write(tmp, sizeof(tmp));
   setNeedsWriteFlush();
   return true;
 }
 
-void DawnClientServerProtocol::beginFrame() {
-  if (_dawnout.flushlen != 0) {
-    // a new frame started before we had a chance to finish writing the last frame
-    dlog("WARNING: new frame while still writing old frame; skipping this frame");
-    return;
-  }
-  onFrame(); // user callback
-}
-
-void* DawnClientServerProtocol::GetCmdSpace(size_t size) {
+void* DawnRemoteProtocol::GetCmdSpace(size_t size) {
   trace("GetCmdSpace %zu", size);
   assert(size <= DAWNCMD_MAX);
   if (sizeof(_dawnout.writebuf) - size < _dawnout.writelen) {
@@ -264,16 +303,12 @@ void* DawnClientServerProtocol::GetCmdSpace(size_t size) {
   return result;
 }
 
-bool DawnClientServerProtocol::Flush() {
+bool DawnRemoteProtocol::Flush() {
   trace("flush dawn command data %u", _dawnout.writelen);
   assert(_dawnout.flushlen == 0 /* is done flushing previous buffer */);
   if (_dawnout.writelen > DAWNCMD_MSG_HEADER_SIZE) {
-    // write header (preallocated at writebuf[0])
-    // use a temporary buffer for snprintf as it writes a trailing null byte.
-    // TODO: use something else than snprintf which doesn't write a trailing null byte.
-    char tmp[DAWNCMD_MSG_HEADER_SIZE+1];
-    snprintf(tmp, sizeof(tmp), "D%08x", _dawnout.writelen - DAWNCMD_MSG_HEADER_SIZE);
-    memcpy(_dawnout.writebuf, tmp, DAWNCMD_MSG_HEADER_SIZE);
+    // write header (preallocated at writebuf[0..DAWNCMD_MSG_HEADER_SIZE])
+    encodeDawnCmdHeader(_dawnout.writebuf, _dawnout.writelen - DAWNCMD_MSG_HEADER_SIZE);
 
     #ifdef DEBUG_TRACE_PROTOCOL
     { // log buffer
@@ -302,3 +337,25 @@ bool DawnClientServerProtocol::Flush() {
   }
   return true;
 }
+
+// bool DawnRemoteProtocol::sendDawnCommands(const char* src, size_t nbyte) {
+//   size_t needbytes = nbyte + DAWNCMD_MSG_HEADER_SIZE;
+//   // proto buffer must be at least the size of the dawn command buffer + header
+//   // to be able to succeed at all.
+//   assert(_wbuf.cap() >= needbytes);
+//   // if there's no room, ask the caller to try again later
+//   if (_wbuf.avail() < needbytes) {
+//     trace("not enough buffer space for dawn command buffer");
+//     return false;
+//   }
+//   // write header: "D" <HEXBYTE>{8}
+//   assert(nbyte <= 0xFFFFFFFF);
+//   char buf[DAWNCMD_MSG_HEADER_SIZE];
+//   encodeDawnCmdHeader(buf, (uint32_t)nbyte);
+//   _wbuf.write(buf, DAWNCMD_MSG_HEADER_SIZE);
+//   // not checking result from _wbuf.write as we already checked _wbuf.avail()
+//   size_t n = _wbuf.write(src, nbyte);
+//   assert(n == nbyte);
+//   setNeedsWriteFlush();
+//   return true;
+// }

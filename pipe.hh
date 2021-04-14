@@ -59,6 +59,7 @@ struct Pipe {
 
   // add data to the beginning of the pipe
   size_t  write(const char* src, size_t nbyte); // copy <=nbyte of dst into the pipe
+  size_t  writec(char c);                       // add c to the pipe
   ssize_t readFromFD(int fd, size_t nbyte);     // read <=nbyte from file (-1 on error)
 
   // take data out of the end of the pipe
@@ -88,6 +89,21 @@ size_t Pipe<Size>::write(const char* data, size_t nbyte) {
   _w = (_w + nbyte) % Size;
   return nbyte;
 }
+
+template <size_t Size>
+size_t Pipe<Size>::writec(char c) {
+  #ifdef DEBUG_TRACE_PIPE
+  char tmp[1] = {c};
+  PipeTrace("writec", tmp, std::min((size_t)1, avail()));
+  #endif
+  if (avail() == 0)
+    return 0;
+  _storage[_w] = c;
+  _w = (_w + 1) % Size;
+  return 1;
+}
+
+size_t  writec(char c);
 
 template <size_t Size>
 ssize_t Pipe<Size>::readFromFD(int fd, size_t nbyte) {

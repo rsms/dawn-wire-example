@@ -117,13 +117,15 @@ int connectUNIXSocket(const char* filename) {
 }
 
 
-DawnClientServerProtocol proto;
+DawnRemoteProtocol proto;
 
 dawn_wire::WireClient* wireClient = nullptr;
 
 wgpu::Device         device;
 wgpu::SwapChain      swapchain;
 wgpu::RenderPipeline pipeline;
+
+//dawn_wire::ReservedSwapChain swapchainReservation;
 
 static void printDeviceError(WGPUErrorType errorType, const char* message, void*) {
   const char* errorTypeName = "";
@@ -272,6 +274,24 @@ void runloop_main(int fd) {
     assert(wireClient != nullptr);
     if (wireClient->HandleCommands(data, len) == nullptr)
       dlog("wireClient->HandleCommands FAILED");
+  };
+  proto.onFramebufferInfo =[](const DawnRemoteProtocol::FramebufferInfo& fbinfo) {
+    dlog("onFramebufferInfo");
+
+    // if (swapchain)
+    //   wireClient->ReclaimSwapChainReservation(swapchainReservation);
+    // swapchainReservation = wireClient->ReserveSwapChain(device.Get());
+    // swapchain = wgpu::SwapChain::Acquire(swapchainReservation.swapchain);
+
+    // // These values are hardcoded in the server and must match. In the future we
+    // // could send these as part of the initial handshake.
+    // //assert(deviceReservation.id == 1);
+    // //assert(deviceReservation.generation == 0);
+    // assert(swapchainReservation.id == 1);
+    // assert(swapchainReservation.generation == 0);
+    // assert(swapchainReservation.deviceId == 1);
+    // assert(swapchainReservation.deviceGeneration == 0);
+
   };
   proto.start(rl, fd);
 

@@ -99,7 +99,8 @@ _build() {
       if ! $printed_msg; then
         printed_msg=true
         # is lockfile stale? (older than 15 minutes)
-        if find "$BUILD_LOCKFILE" -mmin +15 >/dev/null 2>&1; then
+        if ! find "$BUILD_LOCKFILE" -mmin +15 >/dev/null 2>&1; then
+          echo "trashing stale build lock ($OUT_DIR/.build.lock)"
           rm -f "$BUILD_LOCKFILE"
           continue
         fi
@@ -116,16 +117,8 @@ _build() {
 
 if ! $OPT_WATCH; then
   _build "$@"
-  [ -z "$OPT_RUN" ] || exec $OPT_RUN
+  [ -z "$OPT_RUN" ] || $OPT_RUN
   exit 0
-fi
-
-if [ -n "$OPT_RUN" ]; then
-  RUN_PIDFILE="$PWD/run-${$}.pid"
-  __atexit() {
-    _pidfile_kill "$RUN_PIDFILE"
-  }
-  trap __atexit EXIT
 fi
 
 FSWATCH_ARGS=()

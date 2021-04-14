@@ -120,14 +120,20 @@ dawn_native::Adapter backendAdapter;
 wgpu::Device         device;
 wgpu::Surface        surface;
 wgpu::SwapChain      swapchain;
-wgpu::TextureFormat  swapchainTexFormat = wgpu::TextureFormat::BGRA8Unorm;
-wgpu::TextureUsage   swapchainUsage = wgpu::TextureUsage::RenderAttachment;
+
+DawnRemoteProtocol::FramebufferInfo framebufferInfo = {
+  .dpscale = 1000, // 1000=100%
+  .width = 640,
+  .height = 480,
+  .textureFormat = wgpu::TextureFormat::BGRA8Unorm,
+  .textureUsage = wgpu::TextureUsage::RenderAttachment,
+};
 
 
 // Conn is a connection to a client
 struct Conn {
   uint32_t                 id;
-  DawnClientServerProtocol _proto;
+  DawnRemoteProtocol _proto;
   dawn_wire::WireServer    _wireServer;
 
   Conn(uint32_t id_) :
@@ -155,14 +161,20 @@ struct Conn {
     _proto.start(rl, fd);
   }
 
+  bool sendFramebufferInfo() {
+    if (_proto.stopped())
+      return false;
+    return _proto.sendFramebufferInfo(framebufferInfo);
+  }
+
   bool sendFrameSignal() {
     if (_proto.stopped()) {
       close();
       return false;
     }
     // send FRAME message to client
-    if (!_proto.writeFrame()) {
-      dlog("_proto.writeFrame FAILED");
+    if (!_proto.sendFrameSignal()) {
+      dlog("_proto.sendFrameSignal FAILED");
       close();
       return false;
     }
@@ -242,8 +254,8 @@ const char* adapterTypeName(wgpu::AdapterType t) {
   return "?";
 }
 
-// dumpLogAvailableAdapters prints a list of all adapters and their properties
-void dumpLogAvailableAdapters(dawn_native::Instance* instance) {
+// logAvailableAdapters prints a list of all adapters and their properties
+void logAvailableAdapters(dawn_native::Instance* instance) {
   fprintf(stderr, "Available adapters:\n");
   for (auto&& a : instance->GetAdapters()) {
     wgpu::AdapterProperties p;
@@ -255,12 +267,26 @@ void dumpLogAvailableAdapters(dawn_native::Instance* instance) {
   }
 }
 
+// updates values of the global variable framebufferInfo
+void updateFramebufferInfo(uint32_t width, uint32_t height) {
+  framebufferInfo.width = width;
+  framebufferInfo.height = height;
+  float xscale, yscale;
+  glfwGetWindowContentScale(window, &xscale, &yscale);
+  framebufferInfo.dpscale = (uint16_t)std::min((double)0xFFFF, (double)xscale * 1000.0);
+}
+
+void createDawnSwapChain();
+
 // onWindowFramebufferResize is called when a window's framebuffer has changed size
 // width & height are in pixels (the framebuffer size)
 void onWindowFramebufferResize(GLFWwindow* window, int width, int height) {
   dlog("onWindowFramebufferResize width=%d, height=%d", width, height);
-  // reconfigure swapchain
-  swapchain.Configure(swapchainTexFormat, swapchainUsage, (uint32_t)width, (uint32_t)height);
+  // update framebuffer info and swapchain
+  updateFramebufferInfo((uint32_t)width, (uint32_t)height);
+  createDawnSwapChain(); // note: can't use swapchain.Configure when we use a surface
+  if (conn0)
+    conn0->sendFramebufferInfo();
 }
 
 // onWindowResize is called when a window has been resized
@@ -280,9 +306,20 @@ void createOSWindow() {
   // Setup the correct hints for GLFW for backends.
   utils::SetupGLFWWindowHintsForBackend(backendType);
   glfwWindowHint(GLFW_COCOA_RETINA_FRAMEBUFFER, GLFW_FALSE);
-  window = glfwCreateWindow(640, 480, "hello-wire", /*monitor*/nullptr, nullptr);
+  window = glfwCreateWindow(
+    framebufferInfo.width,
+    framebufferInfo.height,
+    "hello-wire",
+    /*monitor*/nullptr,
+    nullptr);
+
   if (!window)
     return;
+
+  // get actual framebuffer size
+  int width, height;
+  glfwGetFramebufferSize(window, &width, &height);
+  updateFramebufferInfo((uint32_t)width, (uint32_t)height);
 
   glfwSetFramebufferSizeCallback(window, onWindowFramebufferResize);
   glfwSetWindowSizeCallback(window, onWindowResize);
@@ -292,7 +329,7 @@ void createDawnDevice() {
   instance = std::make_unique<dawn_native::Instance>();
   instance->DiscoverDefaultAdapters();
 
-  dumpLogAvailableAdapters(instance.get());
+  logAvailableAdapters(instance.get());
 
   // Get an adapter for the backend to use, and create the device.
   {
@@ -325,22 +362,13 @@ void createDawnDevice() {
 
 void createDawnSwapChain() {
   surface = utils::CreateSurfaceForWindow(instance->Get(), window); // global var
-
-  wgpu::SwapChainDescriptor desc;
-  desc.format = swapchainTexFormat;
-  desc.usage = swapchainUsage;
-  desc.width = 640;
-  desc.height = 480;
-  desc.presentMode = wgpu::PresentMode::Mailbox;
-
-  // if we have a window, ask for its actual framebuffer size
-  if (window) {
-    int w, h;
-    glfwGetFramebufferSize(window, &w, &h);
-    desc.width = (uint32_t)w;
-    desc.height = (uint32_t)h;
-  }
-
+  wgpu::SwapChainDescriptor desc = {
+    .format = framebufferInfo.textureFormat,
+    .usage  = framebufferInfo.textureUsage,
+    .width  = framebufferInfo.width,
+    .height = framebufferInfo.height,
+    .presentMode = wgpu::PresentMode::Mailbox,
+  };
   swapchain = device.CreateSwapChain(surface, &desc); // global var
 }
 
@@ -364,6 +392,7 @@ static void onServerIO(RunLoop* rl, ev_io* w, int revents) {
   conn0 = new Conn(connIdGen++);
   dlog("accepted new connection #%u [fd %d]", conn0->id, fd);
   conn0->start(rl, fd);
+  conn0->sendFramebufferInfo();
 }
 
 void onPollTimeout(RunLoop* rl, ev_timer* w, int revents) {

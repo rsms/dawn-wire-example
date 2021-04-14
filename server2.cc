@@ -49,24 +49,6 @@
 #endif
 
 
-// Integer align2<T>(Integer n, Integer w)
-// rounds up n to closest boundary w (w must be a power of two)
-//
-// E.g.
-//   align2(0, 4) => 0
-//   align2(1, 4) => 4
-//   align2(2, 4) => 4
-//   align2(3, 4) => 4
-//   align2(4, 4) => 4
-//   align2(5, 4) => 8
-//   ...
-//
-#define align2(n,w) ({ \
-  assert(((w) & ((w) - 1)) == 0); /* alignment w is not a power of two */ \
-  ((n) + ((w) - 1)) & ~((w) - 1); \
-})
-
-
 static bool FDSetNonBlock(int fd) {
   #ifdef _WIN32
     unsigned long arg = 1;
@@ -129,76 +111,70 @@ int connectUNIXSocket(const char* filename) {
 }
 
 
-#define COMMAND_BUFFER_SIZE 4096*32
 const char* sockfile = "server.sock";
-static dawn_wire::WireServer* wireServer = nullptr;
-static dawn_wire::CommandSerializer* s2cBuf = nullptr;
+static GLFWwindow* window = nullptr;
+static std::unique_ptr<dawn_native::Instance> instance;
+
+DawnProcTable        nativeProcs;
+dawn_native::Adapter backendAdapter;
+wgpu::Device         device;
+wgpu::Surface        surface;
+wgpu::SwapChain      swapchain;
+
 
 // Conn is a connection to a client
 struct Conn {
-  uint32_t id;
+  uint32_t                 id;
+  DawnClientServerProtocol _proto;
+  dawn_wire::WireServer    _wireServer;
 
-  DawnClientServerProtocol proto;
-
-  Conn(uint32_t id_) : id(id_) {
-    proto.onDawnBuffer = [](const char* data, size_t len) {
+  Conn(uint32_t id_) :
+    id(id_),
+    _wireServer({ .procs = &nativeProcs, .serializer = &_proto })
+  {
+    _proto.onDawnBuffer = [this](const char* data, size_t len) {
       dlog("onDawnBuffer len=%zu", len);
       assert(data != nullptr);
-      assert(wireServer != nullptr);
-      if (wireServer->HandleCommands(data, len) == nullptr)
-        dlog("wireServer->HandleCommands FAILED");
-      s2cBuf->Flush();
+      if (_wireServer.HandleCommands(data, len) == nullptr)
+        dlog("_wireServer.HandleCommands FAILED");
+      if (!_proto.Flush())
+        dlog("_proto.Flush() FAILED");
     };
+
+    // Hardcoded generation and IDs need to match what's produced by the client
+    // or be sent over through the wire.
+    _wireServer.InjectDevice(device.Get(), 1, 0);
+    _wireServer.InjectSwapChain(swapchain.Get(), 1, 0, 1, 0);
+    // kangz: Maybe we should inject the surface instead and just let the client
+    // create its swapchain??
+  }
+
+  void start(RunLoop* rl, int fd) {
+    _proto.start(rl, fd);
+  }
+
+  bool sendFrameSignal() {
+    if (_proto.stopped()) {
+      close();
+      return false;
+    }
+    // send FRAME message to client
+    if (!_proto.writeFrame()) {
+      dlog("_proto.writeFrame FAILED");
+      close();
+      return false;
+    }
+    return true;
   }
 
   void close() {
-    proto.stop();
-    if (proto.fd() != -1)
-      ::close(proto.fd());
+    _proto.stop();
+    if (_proto.fd() != -1)
+      ::close(_proto.fd());
   }
 };
 
 Conn* conn0 = nullptr;
-
-class LolCommandBuffer : public dawn_wire::CommandSerializer {
-  //dawn_wire::CommandHandler* mHandler = nullptr;
-  size_t                     mOffset = 0;
-  char                       mBuffer[COMMAND_BUFFER_SIZE];
-  const char*                mName = "";
-public:
-  int w = -1; // file descriptor to write to
-
-  LolCommandBuffer(const char* name) : mName(name) {}
-  //LolCommandBuffer(dawn_wire::CommandHandler* handler) : mHandler(handler) {}
-  //void SetHandler(dawn_wire::CommandHandler* handler) { mHandler = handler; }
-
-  size_t GetMaximumAllocationSize() const override {
-    return sizeof(mBuffer);
-  }
-
-  void* GetCmdSpace(size_t size) override {
-    assert(size <= sizeof(mBuffer));
-    char* result = &mBuffer[mOffset];
-    if (sizeof(mBuffer) - size < mOffset) {
-      if (!Flush())
-        return nullptr;
-      return GetCmdSpace(size);
-    }
-    mOffset += size;
-    return result;
-  }
-
-  bool Flush() override {
-    if (mOffset > 0) {
-      dlog("cmd buffer %s Flush writing %zu bytes", mName, mOffset);
-      // bool success = mHandler->HandleCommands(mBuffer, mOffset) != nullptr;
-      if (!conn0->proto.writeDawnCommands(mBuffer, mOffset))
-        return false;
-      mOffset = 0;
-    }
-    return true;
-  }
-};
 
 // backendType
 // Default to D3D12, Metal, Vulkan, OpenGL in that order as D3D12 and Metal are the preferred on
@@ -283,14 +259,6 @@ void dumpLogAvailableAdapters(dawn_native::Instance* instance) {
   }
 }
 
-DawnProcTable nativeProcs;
-static std::unique_ptr<dawn_native::Instance> instance;
-dawn_native::Adapter backendAdapter;
-wgpu::Device         device;
-wgpu::Surface        surface;
-wgpu::SwapChain      swapchain;
-
-static GLFWwindow* window = nullptr;
 
 void createOSWindow() {
   assert(window == nullptr);
@@ -314,7 +282,6 @@ void createDawnDevice() {
   dumpLogAvailableAdapters(instance.get());
 
   // Get an adapter for the backend to use, and create the device.
-  //dawn_native::Adapter backendAdapter;
   {
     std::vector<dawn_native::Adapter> adapters = instance->GetAdapters();
     auto adapterIt = std::find_if(adapters.begin(), adapters.end(),
@@ -356,23 +323,6 @@ void createDawnSwapChain() {
   swapchain = device.CreateSwapChain(surface, &desc); // global var
 }
 
-void initDawnWire() {
-  // wire server
-  s2cBuf = new LolCommandBuffer("s2c");
-
-  dawn_wire::WireServerDescriptor serverDesc = {};
-  serverDesc.procs = &nativeProcs;
-  serverDesc.serializer = s2cBuf;
-  wireServer = new dawn_wire::WireServer(serverDesc);
-
-  // Hardcoded generation and IDs need to match what's produced by the client
-  // or be sent over through the wire.
-  wireServer->InjectDevice(device.Get(), 1, 0);
-  wireServer->InjectSwapChain(swapchain.Get(), 1, 0, 1, 0);
-  // kangz: Maybe we should inject the surface instead and just let the client
-  // create its swapchain??
-}
-
 // onServerIO is called when a new connection is awaiting accept
 static void onServerIO(RunLoop* rl, ev_io* w, int revents) {
   dlog("onServerIO called");
@@ -392,7 +342,7 @@ static void onServerIO(RunLoop* rl, ev_io* w, int revents) {
   static uint32_t connIdGen = 0;
   conn0 = new Conn(connIdGen++);
   dlog("accepted new connection #%u [fd %d]", conn0->id, fd);
-  conn0->proto.start(rl, fd);
+  conn0->start(rl, fd);
 }
 
 void onPollTimeout(RunLoop* rl, ev_timer* w, int revents) {
@@ -402,13 +352,10 @@ void onPollTimeout(RunLoop* rl, ev_timer* w, int revents) {
 
 void onFrameTimer(RunLoop* rl, ev_timer* w, int revents) {
   if (conn0) {
-    if (conn0->proto.stopped()) {
-      conn0->close();
+    if (!conn0->sendFrameSignal()) {
+      // connection closed
       delete conn0;
       conn0 = nullptr;
-    } else {
-      // send FRAME message to client
-      conn0->proto.writeFrame();
     }
   }
   ev_timer_again(rl, w);
@@ -425,7 +372,6 @@ int main(int argc, const char* argv[]) {
   createOSWindow();
   createDawnDevice();
   createDawnSwapChain();
-  initDawnWire();
 
   RunLoop* rl = EV_DEFAULT;
 
@@ -438,7 +384,7 @@ int main(int argc, const char* argv[]) {
   // use a timer to drive client rendering
   ev_timer frame_timer;
   ev_init(&frame_timer, onFrameTimer);
-  frame_timer.repeat = 1.0;
+  frame_timer.repeat = 1.0 / 10.0;
   ev_timer_again(rl, &frame_timer);
   ev_unref(rl); // don't allow timer to keep runloop alive alone
 

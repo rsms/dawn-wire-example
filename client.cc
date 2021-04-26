@@ -28,14 +28,15 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <fcntl.h> // F_GETFL, O_NONBLOCK etc
+#include <time.h> // strftime
 
 
 #define DLOG_PREFIX "\e[1;36m[client]\e[0m "
 
 #ifdef DEBUG
   #define dlog(format, ...) ({ \
-    fprintf(stderr, DLOG_PREFIX format " \e[2m(%s %d)\e[0m\n", \
-      ##__VA_ARGS__, __FUNCTION__, __LINE__); \
+    fprintf(stderr, "%s " DLOG_PREFIX format " \e[2m(%s %d)\e[0m\n", \
+      tmptimestamp(), ##__VA_ARGS__, __FUNCTION__, __LINE__); \
     fflush(stderr); \
   })
   #define errlog(format, ...) \
@@ -53,6 +54,20 @@
 
 #define MIN(a,b) \
   ({__typeof__ (a) _a = (a); __typeof__ (b) _b = (b); _a < _b ? _a : _b; })
+
+
+static const char* tmptimestamp() {
+  time_t now = time(NULL);
+  struct tm* tm_info = localtime(&now);
+  static char buf[16]; // HH:MM:SS.nnnnnn\0
+  int buftimeoffs = strftime(buf, sizeof(buf), "%H:%M:%S", tm_info);
+  // .mmm
+  double t = ev_time();
+  double ms = (t - std::floor(t)) * 1000000.0;
+  int n = snprintf(&buf[buftimeoffs], sizeof(buf) - buftimeoffs, ".%06u", (uint32_t)ms);
+  buf[n + buftimeoffs] = 0;
+  return buf;
+}
 
 
 static bool FDSetNonBlock(int fd) {
@@ -131,34 +146,6 @@ static void printDeviceError(WGPUErrorType errorType, const char* message, void*
   std::cerr << "device error: " << errorTypeName << " error: " << message << std::endl;
 }
 
-void initDawnWire() {
-  dawn_wire::WireClientDescriptor clientDesc = {};
-  clientDesc.serializer = &proto;
-  wireClient = new dawn_wire::WireClient(clientDesc); // global var
-
-  deviceReservation = wireClient->ReserveDevice();
-  device = wgpu::Device::Acquire(deviceReservation.device); // global var
-
-  DawnProcTable procs = dawn_wire::client::GetProcs();
-  procs.deviceSetUncapturedErrorCallback(device.Get(), printDeviceError, nullptr);
-  dawnProcSetProcs(&procs);
-
-  swapchainReservation = wireClient->ReserveSwapChain(device.Get());
-  swapchain = wgpu::SwapChain::Acquire(swapchainReservation.swapchain);
-
-  // tell server what we reserved
-  proto.sendReservation(swapchainReservation);
-
-  // These values are hardcoded in the server and must match. In the future we
-  // could send these as part of the initial handshake.
-  assert(deviceReservation.id == 1);
-  assert(deviceReservation.generation == 0);
-  assert(swapchainReservation.id == 1);
-  assert(swapchainReservation.generation == 0);
-  assert(swapchainReservation.deviceId == 1);
-  assert(swapchainReservation.deviceGeneration == 0);
-}
-
 
 void initDawnPipeline() {
   utils::ComboRenderPipelineDescriptor2 desc;
@@ -190,9 +177,9 @@ bool animate = true;
 void render_frame() {
   fc++;
 
-  #if DEBUG
-  fprintf(stderr, "\nFRAME\n");
-  #endif
+  // #if DEBUG
+  // fprintf(stderr, "\nFRAME\n");
+  // #endif
 
   float RED   = 0.4;
   float GREEN = 0.4;
@@ -228,20 +215,35 @@ void render_frame() {
 }
 
 
-const char* sockfile = "server.sock";
+void initDawnWire() {
+  dawn_wire::WireClientDescriptor clientDesc = {};
+  clientDesc.serializer = &proto;
+  wireClient = new dawn_wire::WireClient(clientDesc); // global var
 
+  deviceReservation = wireClient->ReserveDevice();
+  device = wgpu::Device::Acquire(deviceReservation.device); // global var
 
-struct {
-  int  fd;
-  bool gotWelcomeMessage;
-} conn;
+  DawnProcTable procs = dawn_wire::client::GetProcs();
+  procs.deviceSetUncapturedErrorCallback(device.Get(), printDeviceError, nullptr);
+  dawnProcSetProcs(&procs);
 
-enum ReadState {
-  Frame,
-  DawnWireHeader,
-  DawnWireBody,
-};
+  // rsms: no, wait until server sends onFramebufferInfo message
+  //
+  // swapchainReservation = wireClient->ReserveSwapChain(device.Get());
+  // swapchain = wgpu::SwapChain::Acquire(swapchainReservation.swapchain);
 
+  // // tell server what we reserved
+  // proto.sendReservation(swapchainReservation);
+
+  // // These values are hardcoded in the server and must match. In the future we
+  // // could send these as part of the initial handshake.
+  // assert(deviceReservation.id == 1);
+  // assert(deviceReservation.generation == 0);
+  // assert(swapchainReservation.id == 1);
+  // assert(swapchainReservation.generation == 0);
+  // assert(swapchainReservation.deviceId == 1);
+  // assert(swapchainReservation.deviceGeneration == 0);
+}
 
 void runloop_main(int fd) {
   RunLoop* rl = EV_DEFAULT;
@@ -256,37 +258,45 @@ void runloop_main(int fd) {
     if (wireClient->HandleCommands(data, len) == nullptr)
       dlog("wireClient->HandleCommands FAILED");
   };
+
   proto.onFramebufferInfo = [](const DawnRemoteProtocol::FramebufferInfo& fbinfo) {
-    dlog("onFramebufferInfo");
-    // // [WORK IN PROGRESS] replace/update swapchain
-    // if (swapchain)
-    //   wireClient->ReclaimSwapChainReservation(swapchainReservation);
-    // swapchainReservation = wireClient->ReserveSwapChain(device.Get());
-    // swapchain = wgpu::SwapChain::Acquire(swapchainReservation.swapchain);
-    // proto.sendReservation(swapchainReservation);
+    double dpscale = (double)fbinfo.dpscale / 1000.0;
+    dlog("onFramebufferInfo %ux%u@%.2f", fbinfo.width, fbinfo.height, dpscale);
+    // [WORK IN PROGRESS] replace/update swapchain
+    dlog("reserving new swapchain");
+    if (swapchain) {
+      wireClient->ReclaimSwapChainReservation(swapchainReservation);
+    }
+    swapchainReservation = wireClient->ReserveSwapChain(device.Get());
+    swapchain = wgpu::SwapChain::Acquire(swapchainReservation.swapchain);
+    dlog("sending swapchain reservation to server");
+    proto.sendReservation(swapchainReservation);
   };
   proto.start(rl, fd);
 
   initDawnWire();
   initDawnPipeline();
 
-  ::memset(&conn, 0, sizeof(conn));
-  conn.fd = fd;
-  //c2sBuf->w = fd;
-
   ev_run(rl, 0);
   dlog("exit runloop");
 }
 
 int main(int argc, const char* argv[]) {
+  bool first_retry = true;
+  const char* sockfile = "server.sock";
   while (1) {
-    dlog("connecting to UNIX socket \"%s\"", sockfile);
+    if (first_retry) {
+      dlog("connecting to UNIX socket \"%s\" ...", sockfile);
+      first_retry = false;
+    }
     int fd = connectUNIXSocket(sockfile);
     if (fd < 0) {
-      perror("connectUNIXSocket");
+      if (errno != ECONNREFUSED && errno != ENOENT)
+        perror("connectUNIXSocket");
       sleep(1);
       continue;
     }
+    first_retry = true;
     dlog("connected to socket");
     double t = ev_time();
     runloop_main(fd);

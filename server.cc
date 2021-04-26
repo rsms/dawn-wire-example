@@ -35,8 +35,8 @@
 
 #ifdef DEBUG
   #define dlog(format, ...) ({ \
-    fprintf(stderr, DLOG_PREFIX format " \e[2m(%s %d)\e[0m\n", \
-      ##__VA_ARGS__, __FUNCTION__, __LINE__); \
+    fprintf(stderr, "%s " DLOG_PREFIX format " \e[2m(%s %d)\e[0m\n", \
+      tmptimestamp(), ##__VA_ARGS__, __FUNCTION__, __LINE__); \
     fflush(stderr); \
   })
   #define errlog(format, ...) \
@@ -47,6 +47,19 @@
   #define errlog(format, ...) \
 (({ fprintf(stderr, "E " format "\n", ##__VA_ARGS__); fflush(stderr); }))
 #endif
+
+static const char* tmptimestamp() {
+  time_t now = time(NULL);
+  struct tm* tm_info = localtime(&now);
+  static char buf[16]; // HH:MM:SS.nnnnnn\0
+  int buftimeoffs = strftime(buf, sizeof(buf), "%H:%M:%S", tm_info);
+  // .mmm
+  double t = ev_time();
+  double ms = (t - std::floor(t)) * 1000000.0;
+  int n = snprintf(&buf[buftimeoffs], sizeof(buf) - buftimeoffs, ".%06u", (uint32_t)ms);
+  buf[n + buftimeoffs] = 0;
+  return buf;
+}
 
 
 static bool FDSetNonBlock(int fd) {
@@ -115,6 +128,7 @@ DawnRemoteProtocol::FramebufferInfo framebufferInfo = {
   .textureUsage = wgpu::TextureUsage::RenderAttachment,
 };
 
+void createDawnSwapChain();
 
 // Conn is a connection to a client
 struct Conn {
@@ -127,33 +141,70 @@ struct Conn {
     _wireServer({ .procs = &nativeProcs, .serializer = &_proto })
   {
     _proto.onDawnBuffer = [this](const char* data, size_t len) {
-      dlog("onDawnBuffer len=%zu", len);
+      // dlog("onDawnBuffer len=%zu", len);
       assert(data != nullptr);
       if (_wireServer.HandleCommands(data, len) == nullptr)
-        dlog("_wireServer.HandleCommands FAILED");
+        dlog("onDawnBuffer: _wireServer.HandleCommands FAILED");
       if (!_proto.Flush())
         dlog("_proto.Flush() FAILED");
     };
 
     _proto.onSwapchainReservation = [this](const dawn_wire::ReservedSwapChain& scr) {
-      dlog("onSwapchainReservation");
-      // if (!_wireServer.InjectDevice(device.Get(), scr.deviceId, scr.deviceGeneration)) {
-      //   dlog("onDeviceReservation _wireServer.InjectDevice FAILED");
-      //   return;
-      // }
-      if (!_wireServer.InjectSwapChain(
-        swapchain.Get(), scr.id, scr.generation, scr.deviceId, scr.deviceGeneration))
-      {
-        dlog("onSwapchainReservation _wireServer.InjectSwapChain FAILED");
-      }
+      this->onSwapchainReservation(scr);
     };
 
     // Hardcoded generation and IDs need to match what's produced by the client
     // or be sent over through the wire.
-    _wireServer.InjectDevice(device.Get(), 1, 0);
-    _wireServer.InjectSwapChain(swapchain.Get(), 1, 0, 1, 0);
+    //_wireServer.InjectDevice(device.Get(), 1, 0);
+    //_wireServer.InjectSwapChain(swapchain.Get(), 1, 0, 1, 0);
     // kangz: Maybe we should inject the surface instead and just let the client
     // create its swapchain??
+  }
+
+  void onSwapchainReservation(const dawn_wire::ReservedSwapChain& scr) {
+    dlog("onSwapchainReservation\n"
+      "  device    id, generation: %u, %u\n"
+      "  swapchain id, generation: %u, %u\n",
+      scr.deviceId, scr.deviceGeneration,
+      scr.id, scr.generation);
+
+    // // recreate swapchain
+    // wgpu::SwapChainDescriptor desc = {
+    //   .format = framebufferInfo.textureFormat,
+    //   .usage  = framebufferInfo.textureUsage,
+    //   .width  = framebufferInfo.width,
+    //   .height = framebufferInfo.height,
+    //   .presentMode = wgpu::PresentMode::Mailbox,
+    // };
+    // swapchain = device.CreateSwapChain(surface, &desc); // global var
+
+    if (_wireServer.GetDevice(scr.deviceId, scr.deviceGeneration) == nullptr) {
+      if (!_wireServer.InjectDevice(device.Get(), scr.deviceId, scr.deviceGeneration)) {
+        dlog("onSwapchainReservation _wireServer.InjectDevice FAILED");
+      } else {
+        dlog("onSwapchainReservation _wireServer.InjectDevice OK");
+      }
+    }
+
+    if (!_wireServer.InjectSwapChain(
+           swapchain.Get(), scr.id, scr.generation, scr.deviceId, scr.deviceGeneration))
+    {
+      dlog("onSwapchainReservation _wireServer.InjectSwapChain FAILED");
+    } else {
+      dlog("onSwapchainReservation _wireServer.InjectSwapChain OK");
+      // createDawnSwapChain();
+    }
+
+    // // if (!_wireServer.InjectDevice(device.Get(), scr.deviceId, scr.deviceGeneration)) {
+    // //   dlog("onDeviceReservation _wireServer.InjectDevice FAILED");
+    // //   return;
+    // // }
+    // if (!_wireServer.InjectSwapChain(
+    //   swapchain.Get(), scr.id, scr.generation, scr.deviceId, scr.deviceGeneration))
+    // {
+    //   dlog("onSwapchainReservation _wireServer.InjectSwapChain FAILED");
+    //   // this->close();
+    // }
   }
 
   void start(RunLoop* rl, int fd) {
@@ -163,6 +214,7 @@ struct Conn {
   bool sendFramebufferInfo() {
     if (_proto.stopped())
       return false;
+    dlog("sending framebuffer info to client #%u", this->id);
     return _proto.sendFramebufferInfo(framebufferInfo);
   }
 
@@ -180,14 +232,20 @@ struct Conn {
     return true;
   }
 
-  void close() {
-    _proto.stop();
-    if (_proto.fd() != -1)
-      ::close(_proto.fd());
-  }
+  void close();
 };
 
 Conn* conn0 = nullptr;
+
+void Conn::close() {
+  _proto.stop();
+  if (_proto.fd() != -1)
+    ::close(_proto.fd());
+  if (this == conn0) {
+    conn0 = nullptr;
+    delete this;
+  }
+}
 
 // backendType
 // Default to D3D12, Metal, Vulkan, OpenGL in that order as D3D12 and Metal are the preferred on
@@ -275,18 +333,15 @@ void updateFramebufferInfo(uint32_t width, uint32_t height) {
   framebufferInfo.dpscale = (uint16_t)std::min((double)0xFFFF, (double)xscale * 1000.0);
 }
 
-void createDawnSwapChain();
-
 // onWindowFramebufferResize is called when a window's framebuffer has changed size
 // width & height are in pixels (the framebuffer size)
 void onWindowFramebufferResize(GLFWwindow* window, int width, int height) {
   dlog("onWindowFramebufferResize width=%d, height=%d", width, height);
   // [WORK IN PROGRESS]
-  // // update framebuffer info and swapchain
-  // updateFramebufferInfo((uint32_t)width, (uint32_t)height);
-  // createDawnSwapChain(); // note: can't use swapchain.Configure when we use a surface
-  // if (conn0)
-  //   conn0->sendFramebufferInfo();
+  // update framebuffer info and swapchain
+  updateFramebufferInfo((uint32_t)width, (uint32_t)height);
+  if (conn0)
+    conn0->sendFramebufferInfo();
 }
 
 // onWindowResize is called when a window has been resized
@@ -390,7 +445,7 @@ static void onServerIO(RunLoop* rl, ev_io* w, int revents) {
 
   static uint32_t connIdGen = 0;
   conn0 = new Conn(connIdGen++);
-  dlog("accepted new connection #%u [fd %d]", conn0->id, fd);
+  dlog("client #%u connected on fd %d", conn0->id, fd);
   conn0->start(rl, fd);
   conn0->sendFramebufferInfo();
 }

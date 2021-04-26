@@ -31,7 +31,7 @@
 #include <sys/un.h>
 #include <fcntl.h> // F_GETFL, O_NONBLOCK etc
 
-#define DLOG_PREFIX "\e[1;34m[server2]\e[0m "
+#define DLOG_PREFIX "\e[1;34m[server]\e[0m "
 
 #ifdef DEBUG
   #define dlog(format, ...) ({ \
@@ -162,11 +162,8 @@ struct Conn {
   }
 
   void onSwapchainReservation(const dawn_wire::ReservedSwapChain& scr) {
-    dlog("onSwapchainReservation\n"
-      "  device    id, generation: %u, %u\n"
-      "  swapchain id, generation: %u, %u\n",
-      scr.deviceId, scr.deviceGeneration,
-      scr.id, scr.generation);
+    dlog("onSwapchainReservation device: %u %u, swapchain %u %u\n",
+      scr.deviceId, scr.deviceGeneration, scr.id, scr.generation);
 
     // // recreate swapchain
     // wgpu::SwapChainDescriptor desc = {

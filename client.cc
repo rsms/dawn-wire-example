@@ -113,17 +113,6 @@ int connectUNIXSocket(const char* filename) {
 }
 
 
-DawnRemoteProtocol proto;
-
-dawn_wire::WireClient* wireClient = nullptr;
-
-wgpu::Device         device;
-wgpu::SwapChain      swapchain;
-wgpu::RenderPipeline pipeline;
-
-dawn_wire::ReservedDevice    deviceReservation;
-dawn_wire::ReservedSwapChain swapchainReservation;
-
 static void printDeviceError(WGPUErrorType errorType, const char* message, void*) {
   const char* errorTypeName = "";
   switch (errorType) {
@@ -147,136 +136,178 @@ static void printDeviceError(WGPUErrorType errorType, const char* message, void*
 }
 
 
-void initDawnPipeline() {
-  utils::ComboRenderPipelineDescriptor2 desc;
-  desc.vertex.module = utils::CreateShaderModule(device, R"(
-    let pos : array<vec2<f32>, 3> = array<vec2<f32>, 3>(
-        vec2<f32>( 0.0,  0.5),
-        vec2<f32>(-0.5, -0.5),
-        vec2<f32>( 0.5, -0.5)
-    );
-    [[stage(vertex)]] fn main(
-        [[builtin(vertex_index)]] VertexIndex : u32
-    ) -> [[builtin(position)]] vec4<f32> {
-        return vec4<f32>(pos[VertexIndex], 0.0, 1.0);
+struct Connection {
+  DawnRemoteProtocol proto;
+
+  dawn_wire::WireClient* wireClient = nullptr;
+  wgpu::Device           device;
+  wgpu::SwapChain        swapchain;
+  wgpu::RenderPipeline   pipeline;
+
+  dawn_wire::ReservedDevice    deviceReservation;
+  dawn_wire::ReservedSwapChain swapchainReservation;
+
+  ~Connection() {
+    // prevent double free by releasing refs to things that the wireClient owns
+    if (wireClient) {
+      pipeline.Release();
+      device.Release();
+      swapchain.Release();
+      delete wireClient;
     }
-  )");
-  desc.cFragment.module = utils::CreateShaderModule(device, R"(
-    [[stage(fragment)]] fn main() -> [[location(0)]] vec4<f32> {
-        return vec4<f32>(1.0, 0.0, 0.7, 1.0);
-    }
-  )");
-  desc.cTargets[0].format = wgpu::TextureFormat::BGRA8Unorm;
-
-  pipeline = device.CreateRenderPipeline2(&desc); // global var
-}
-
-uint32_t fc = 0;
-bool animate = true;
-
-void render_frame() {
-  fc++;
-
-  // #if DEBUG
-  // fprintf(stderr, "\nFRAME\n");
-  // #endif
-
-  float RED   = 0.4;
-  float GREEN = 0.4;
-  float BLUE  = 0.4;
-  if (animate) {
-    RED   = std::abs(sinf(float(fc) / 100));
-    GREEN = std::abs(sinf(float(fc) / 90));
-    BLUE  = std::abs(cosf(float(fc) / 80));
   }
 
-  wgpu::RenderPassColorAttachmentDescriptor colorAttachment;
-  colorAttachment.attachment = swapchain.GetCurrentTextureView();
-  colorAttachment.clearColor = {RED, GREEN, BLUE, 0.0f};
-  colorAttachment.loadOp = wgpu::LoadOp::Clear;
-  colorAttachment.storeOp = wgpu::StoreOp::Store;
+  void initDawnWire() {
+    dawn_wire::WireClientDescriptor clientDesc = {};
+    clientDesc.serializer = &proto;
+    wireClient = new dawn_wire::WireClient(clientDesc); // global var
 
-  wgpu::RenderPassDescriptor renderPassDesc;
-  renderPassDesc.colorAttachmentCount = 1;
-  renderPassDesc.colorAttachments = &colorAttachment;
+    deviceReservation = wireClient->ReserveDevice();
+    device = wgpu::Device::Acquire(deviceReservation.device); // global var
 
-  wgpu::CommandEncoder encoder = device.CreateCommandEncoder();
-  wgpu::RenderPassEncoder pass = encoder.BeginRenderPass(&renderPassDesc);
-  pass.SetPipeline(pipeline);
-  pass.Draw(3);
-  pass.EndPass();
+    DawnProcTable procs = dawn_wire::client::GetProcs();
+    procs.deviceSetUncapturedErrorCallback(device.Get(), printDeviceError, nullptr);
+    dawnProcSetProcs(&procs);
 
-  wgpu::CommandBuffer commands = encoder.Finish();
-  device.GetQueue().Submit(1, &commands);
+    // rsms: no, wait until server sends onFramebufferInfo message
+    //
+    // swapchainReservation = wireClient->ReserveSwapChain(device.Get());
+    // swapchain = wgpu::SwapChain::Acquire(swapchainReservation.swapchain);
 
-  swapchain.Present();
+    // // tell server what we reserved
+    // proto.sendReservation(swapchainReservation);
 
-  proto.Flush();
-}
+    // // These values are hardcoded in the server and must match. In the future we
+    // // could send these as part of the initial handshake.
+    // assert(deviceReservation.id == 1);
+    // assert(deviceReservation.generation == 0);
+    // assert(swapchainReservation.id == 1);
+    // assert(swapchainReservation.generation == 0);
+    // assert(swapchainReservation.deviceId == 1);
+    // assert(swapchainReservation.deviceGeneration == 0);
+  }
 
+  void initDawnPipeline() {
+    utils::ComboRenderPipelineDescriptor2 desc;
+    desc.vertex.module = utils::CreateShaderModule(device, R"(
+      let pos : array<vec2<f32>, 3> = array<vec2<f32>, 3>(
+          vec2<f32>( 0.0,  0.5),
+          vec2<f32>(-0.5, -0.5),
+          vec2<f32>( 0.5, -0.5)
+      );
+      [[stage(vertex)]] fn main(
+          [[builtin(vertex_index)]] VertexIndex : u32
+      ) -> [[builtin(position)]] vec4<f32> {
+          return vec4<f32>(pos[VertexIndex], 0.0, 1.0);
+      }
+    )");
+    desc.cFragment.module = utils::CreateShaderModule(device, R"(
+      [[stage(fragment)]] fn main() -> [[location(0)]] vec4<f32> {
+          return vec4<f32>(1.0, 0.0, 0.7, 1.0);
+      }
+    )");
+    desc.cTargets[0].format = wgpu::TextureFormat::BGRA8Unorm;
 
-void initDawnWire() {
-  dawn_wire::WireClientDescriptor clientDesc = {};
-  clientDesc.serializer = &proto;
-  wireClient = new dawn_wire::WireClient(clientDesc); // global var
+    pipeline = device.CreateRenderPipeline2(&desc); // global var
+  }
 
-  deviceReservation = wireClient->ReserveDevice();
-  device = wgpu::Device::Acquire(deviceReservation.device); // global var
+  void start(RunLoop* rl, int fd) {
+    initDawnWire();
+    initDawnPipeline();
+    proto.start(rl, fd);
+  }
 
-  DawnProcTable procs = dawn_wire::client::GetProcs();
-  procs.deviceSetUncapturedErrorCallback(device.Get(), printDeviceError, nullptr);
-  dawnProcSetProcs(&procs);
+  uint32_t fc = 0;
+  bool animate = true;
 
-  // rsms: no, wait until server sends onFramebufferInfo message
-  //
-  // swapchainReservation = wireClient->ReserveSwapChain(device.Get());
-  // swapchain = wgpu::SwapChain::Acquire(swapchainReservation.swapchain);
+  void render_frame() {
+    fc++;
 
-  // // tell server what we reserved
-  // proto.sendReservation(swapchainReservation);
+    // #if DEBUG
+    // fprintf(stderr, "\nFRAME\n");
+    // #endif
 
-  // // These values are hardcoded in the server and must match. In the future we
-  // // could send these as part of the initial handshake.
-  // assert(deviceReservation.id == 1);
-  // assert(deviceReservation.generation == 0);
-  // assert(swapchainReservation.id == 1);
-  // assert(swapchainReservation.generation == 0);
-  // assert(swapchainReservation.deviceId == 1);
-  // assert(swapchainReservation.deviceGeneration == 0);
-}
+    float RED   = 0.4;
+    float GREEN = 0.4;
+    float BLUE  = 0.4;
+    if (animate) {
+      RED   = std::abs(sinf(float(fc*10) / 100));
+      GREEN = std::abs(sinf(float(fc*10) / 90));
+      BLUE  = std::abs(cosf(float(fc*10) / 80));
+    }
+
+    wgpu::RenderPassColorAttachmentDescriptor colorAttachment;
+    colorAttachment.view = swapchain.GetCurrentTextureView();
+    colorAttachment.clearColor = {RED, GREEN, BLUE, 0.0f};
+    colorAttachment.loadOp = wgpu::LoadOp::Clear;
+    colorAttachment.storeOp = wgpu::StoreOp::Store;
+
+    wgpu::RenderPassDescriptor renderPassDesc;
+    renderPassDesc.colorAttachmentCount = 1;
+    renderPassDesc.colorAttachments = &colorAttachment;
+
+    wgpu::CommandEncoder encoder = device.CreateCommandEncoder();
+    wgpu::RenderPassEncoder pass = encoder.BeginRenderPass(&renderPassDesc);
+    pass.SetPipeline(pipeline);
+    pass.Draw(3);
+    pass.EndPass();
+
+    wgpu::CommandBuffer commands = encoder.Finish();
+    device.GetQueue().Submit(1, &commands);
+
+    swapchain.Present();
+
+    proto.Flush();
+  }
+};
+
 
 void runloop_main(int fd) {
   RunLoop* rl = EV_DEFAULT;
   FDSetNonBlock(fd);
 
-  proto.onFrame = []() {
-    render_frame();
+  Connection conn;
+
+  conn.proto.onFrame = [&]() {
+    conn.render_frame();
   };
-  proto.onDawnBuffer = [](const char* data, size_t len) {
+
+  conn.proto.onDawnBuffer = [&](const char* data, size_t len) {
     dlog("onDawnBuffer len=%zu", len);
-    assert(wireClient != nullptr);
-    if (wireClient->HandleCommands(data, len) == nullptr)
+    assert(conn.wireClient != nullptr);
+    if (conn.wireClient->HandleCommands(data, len) == nullptr)
       dlog("wireClient->HandleCommands FAILED");
   };
 
-  proto.onFramebufferInfo = [](const DawnRemoteProtocol::FramebufferInfo& fbinfo) {
+  conn.proto.onFramebufferInfo = [&](const DawnRemoteProtocol::FramebufferInfo& fbinfo) {
     double dpscale = (double)fbinfo.dpscale / 1000.0;
     dlog("onFramebufferInfo %ux%u@%.2f", fbinfo.width, fbinfo.height, dpscale);
+
+    #define ENABLE_FBINFO_WORKAROUND_RESTART
+    #ifdef ENABLE_FBINFO_WORKAROUND_RESTART
+    // XXX FIXME
+    // This is a terrible and temporary fix util we can figure out how to make Dawn
+    // sync and update its swapchain resevation and/or wire client & server, etc.
+    // Whenever the server framebuffer changes, drop this connection and restart the client
+    // with a new connection.
+    if (conn.swapchain) {
+      conn.proto.stop();
+      return;
+    }
+    #endif
+
     // [WORK IN PROGRESS] replace/update swapchain
     dlog("reserving new swapchain");
-    if (swapchain) {
-      wireClient->ReclaimSwapChainReservation(swapchainReservation);
+    if (conn.swapchain) {
+      conn.wireClient->ReclaimSwapChainReservation(conn.swapchainReservation);
     }
-    swapchainReservation = wireClient->ReserveSwapChain(device.Get());
-    swapchain = wgpu::SwapChain::Acquire(swapchainReservation.swapchain);
+    conn.swapchainReservation = conn.wireClient->ReserveSwapChain(conn.device.Get());
+    conn.swapchain = wgpu::SwapChain::Acquire(conn.swapchainReservation.swapchain);
     dlog("sending swapchain reservation to server");
-    proto.sendReservation(swapchainReservation);
+    conn.proto.sendReservation(conn.swapchainReservation);
   };
-  proto.start(rl, fd);
 
-  initDawnWire();
-  initDawnPipeline();
-
+  conn.start(rl, fd);
   ev_run(rl, 0);
   dlog("exit runloop");
 }

@@ -122,7 +122,7 @@ wgpu::SwapChain      swapchain;
 
 DawnRemoteProtocol::FramebufferInfo framebufferInfo = {
   .dpscale = 1000, // 1000=100%
-  .width = 640,
+  .width  = 640,
   .height = 480,
   .textureFormat = wgpu::TextureFormat::BGRA8Unorm,
   .textureUsage = wgpu::TextureUsage::RenderAttachment,
@@ -176,20 +176,22 @@ struct Conn {
     // swapchain = device.CreateSwapChain(surface, &desc); // global var
 
     if (_wireServer.GetDevice(scr.deviceId, scr.deviceGeneration) == nullptr) {
-      if (!_wireServer.InjectDevice(device.Get(), scr.deviceId, scr.deviceGeneration)) {
-        dlog("onSwapchainReservation _wireServer.InjectDevice FAILED");
-      } else {
+      if (_wireServer.InjectDevice(device.Get(), scr.deviceId, scr.deviceGeneration)) {
         dlog("onSwapchainReservation _wireServer.InjectDevice OK");
+      } else {
+        dlog("onSwapchainReservation _wireServer.InjectDevice FAILED");
       }
     }
 
-    if (!_wireServer.InjectSwapChain(
+    if (_wireServer.InjectSwapChain(
            swapchain.Get(), scr.id, scr.generation, scr.deviceId, scr.deviceGeneration))
     {
-      dlog("onSwapchainReservation _wireServer.InjectSwapChain FAILED");
-    } else {
       dlog("onSwapchainReservation _wireServer.InjectSwapChain OK");
       // createDawnSwapChain();
+    } else {
+      dlog("onSwapchainReservation _wireServer.InjectSwapChain FAILED");
+      // ObjectData<WGPUSwapChain>* data = _wireServer.SwapChainObjects().Allocate(scr.id);
+      // dlog("SwapChainObjects().Allocate => %p", data);
     }
 
     // // if (!_wireServer.InjectDevice(device.Get(), scr.deviceId, scr.deviceGeneration)) {
@@ -330,15 +332,32 @@ void updateFramebufferInfo(uint32_t width, uint32_t height) {
   framebufferInfo.dpscale = (uint16_t)std::min((double)0xFFFF, (double)xscale * 1000.0);
 }
 
-// onWindowFramebufferResize is called when a window's framebuffer has changed size
-// width & height are in pixels (the framebuffer size)
-void onWindowFramebufferResize(GLFWwindow* window, int width, int height) {
-  dlog("onWindowFramebufferResize width=%d, height=%d", width, height);
-  // [WORK IN PROGRESS]
-  // update framebuffer info and swapchain
-  updateFramebufferInfo((uint32_t)width, (uint32_t)height);
+void onWindowFramebufferResizeTimer(RunLoop* rl, ev_timer* w, int revents) {
+  // dlog("onWindowFramebufferResizeTimer");
+  ev_timer_stop(rl, w);
+  createDawnSwapChain();
   if (conn0)
     conn0->sendFramebufferInfo();
+}
+
+// onWindowFramebufferResize is called when a window's framebuffer has changed size.
+// width & height are in pixels (the framebuffer size)
+void onWindowFramebufferResize(GLFWwindow* window, int width, int height) {
+  // dlog("onWindowFramebufferResize width=%d, height=%d", width, height);
+
+  updateFramebufferInfo((uint32_t)width, (uint32_t)height);
+
+  static ev_timer debounce_timer;
+  static bool debounce_timer_init = false;
+  if (!debounce_timer_init) {
+    debounce_timer_init = true;
+    // debounce_timer.repeat = 0.100;
+    ev_timer_init(&debounce_timer, onWindowFramebufferResizeTimer, 0.0, 0.100);
+    ev_timer_start(EV_DEFAULT, &debounce_timer);
+    ev_unref(EV_DEFAULT); // don't allow timer to keep runloop alive alone
+  } else {
+    ev_timer_again(EV_DEFAULT, &debounce_timer);
+  }
 }
 
 // onWindowResize is called when a window has been resized
@@ -373,6 +392,8 @@ void createOSWindow() {
   glfwGetFramebufferSize(window, &width, &height);
   updateFramebufferInfo((uint32_t)width, (uint32_t)height);
 
+  // Note: We can use glfwSetWindowUserPointer and glfwGetWindowUserPointer to attach
+  // some custom state to a GLFW window.
   glfwSetFramebufferSizeCallback(window, onWindowFramebufferResize);
   glfwSetWindowSizeCallback(window, onWindowResize);
 }
@@ -486,7 +507,7 @@ int main(int argc, const char* argv[]) {
   // use a timer to drive client rendering
   ev_timer frame_timer;
   ev_init(&frame_timer, onFrameTimer);
-  frame_timer.repeat = 1.0 / 10.0;
+  frame_timer.repeat = 1.0 / 60.0;
   ev_timer_again(rl, &frame_timer);
   ev_unref(rl); // don't allow timer to keep runloop alive alone
 

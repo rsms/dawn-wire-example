@@ -14,12 +14,12 @@
 
 #include "protocol.hh"
 
-#include "utils/ComboRenderPipelineDescriptor.h"
-#include "utils/WGPUHelpers.h"
-
-#include <dawn/webgpu.h>
+#include <dawn/common/Assert.h>
 #include <dawn/dawn_proc.h>
-#include <dawn_wire/WireClient.h>
+#include <dawn/utils/ComboRenderPipelineDescriptor.h>
+#include <dawn/utils/WGPUHelpers.h>
+#include <dawn/webgpu.h>
+#include <dawn/wire/WireClient.h>
 
 #include <cmath>
 #include <iostream>
@@ -188,7 +188,7 @@ struct Connection {
   }
 
   void initDawnPipeline() {
-    utils::ComboRenderPipelineDescriptor2 desc;
+    utils::ComboRenderPipelineDescriptor desc;
     desc.vertex.module = utils::CreateShaderModule(device, R"(
       let pos : array<vec2<f32>, 3> = array<vec2<f32>, 3>(
           vec2<f32>( 0.0,  0.5),
@@ -208,7 +208,7 @@ struct Connection {
     )");
     desc.cTargets[0].format = wgpu::TextureFormat::BGRA8Unorm;
 
-    pipeline = device.CreateRenderPipeline2(&desc); // global var
+    pipeline = device.CreateRenderPipeline(&desc); // global var
   }
 
   void start(RunLoop* rl, int fd) {
@@ -236,9 +236,9 @@ struct Connection {
       BLUE  = std::abs(cosf(float(fc*10) / 80));
     }
 
-    wgpu::RenderPassColorAttachmentDescriptor colorAttachment;
+    wgpu::RenderPassColorAttachment colorAttachment;
     colorAttachment.view = swapchain.GetCurrentTextureView();
-    colorAttachment.clearColor = {RED, GREEN, BLUE, 0.0f};
+    colorAttachment.clearValue = {RED, GREEN, BLUE, 0.0f};
     colorAttachment.loadOp = wgpu::LoadOp::Clear;
     colorAttachment.storeOp = wgpu::StoreOp::Store;
 

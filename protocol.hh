@@ -5,9 +5,9 @@
 #include <limits>
 #include <algorithm>
 
-#include <dawn_wire/Wire.h>
-#include <dawn_wire/WireClient.h>
 #include <dawn/webgpu_cpp.h>
+#include <dawn/wire/Wire.h>
+#include <dawn/wire/WireClient.h>
 
 // DEBUG_TRACE_PROTOCOL: define to trace protocol I/O
 // #define DEBUG_TRACE_PROTOCOL
@@ -29,7 +29,7 @@ typedef struct ev_loop RunLoop;
 #define DAWNCMD_MAX             (4096*32)
 #define DAWNCMD_BUFSIZE         (DAWNCMD_MAX + DAWNCMD_MSG_HEADER_SIZE)
 
-struct DawnRemoteProtocol : public dawn_wire::CommandSerializer {
+struct DawnRemoteProtocol : public dawn::wire::CommandSerializer {
   struct FramebufferInfo {
     wgpu::TextureFormat textureFormat;
     wgpu::TextureUsage  textureUsage;

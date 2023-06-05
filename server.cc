@@ -14,13 +14,13 @@
 
 #include "protocol.hh"
 
-#include "utils/GLFWUtils.h"
 #include "GLFW/glfw3.h"
 
-#include <dawn/webgpu_cpp.h>
 #include <dawn/dawn_proc.h>
-#include <dawn_wire/WireServer.h>
-#include <dawn_native/DawnNative.h>
+#include <dawn/native/DawnNative.h>
+#include <dawn/webgpu_cpp.h>
+#include <dawn/wire/WireServer.h>
+#include <webgpu/webgpu_glfw.h>
 
 #include <algorithm>
 #include <cmath>
@@ -375,7 +375,6 @@ void createOSWindow() {
     return;
 
   // Setup the correct hints for GLFW for backends.
-  utils::SetupGLFWWindowHintsForBackend(backendType);
   glfwWindowHint(GLFW_COCOA_RETINA_FRAMEBUFFER, GLFW_FALSE);
   window = glfwCreateWindow(
     framebufferInfo.width,
@@ -434,7 +433,8 @@ void createDawnDevice() {
 }
 
 void createDawnSwapChain() {
-  surface = utils::CreateSurfaceForWindow(instance->Get(), window); // global var
+  surface =
+      wgpu::glfw::CreateSurfaceForWindow(instance->Get(), window); // global var
   wgpu::SwapChainDescriptor desc = {
     .format = framebufferInfo.textureFormat,
     .usage  = framebufferInfo.textureUsage,
